@@ -39,4 +39,8 @@ urlpatterns = [
         ),
         name="swagger-ui",
     ),
+    path(
+        "api/v1/employees/",
+        include("employees.urls"),
+    ),
 ]
