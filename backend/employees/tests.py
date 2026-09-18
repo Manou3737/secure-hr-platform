@@ -3,7 +3,7 @@ from datetime import date
 
 from django.test import TestCase
 
-from accounts.models import User
+from accounts.models import User, SecurityEvent
 from .models import EmployeeProfile
 from .serializers import EmployeeProfileSerializer
 
@@ -354,4 +354,143 @@ class EmployeeProfileRBACAPITests(TestCase):
         self.assertIn(
             "user",
             response.data,
+        )
+
+    def test_employee_creation_creates_security_event(self):
+        """Creating an employee creates an audit event."""
+
+        self.authenticate(self.super_admin)
+
+        new_user = User.objects.create_user(
+            email="auditcreate@example.com",
+            name="Audit Create",
+            password="StrongPassword123!",
+            role="EMPLOYEE",
+        )
+
+        self.client.defaults["HTTP_USER_AGENT"] = (
+            "Test-Audit-Create"
+        )
+
+        response = self.client.post(
+            self.url,
+            {
+                "user": new_user.id,
+                "employee_id": "EMP-003",
+                "department": "Engineering",
+                "job_title": "Backend Developer",
+                "hire_date": "2026-03-01",
+            },
+            format="json",
+        )
+
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_201_CREATED,
+        )
+
+        event = SecurityEvent.objects.filter(
+            event_type="EMPLOYEE_CREATED"
+        ).latest("created_at")
+
+        self.assertEqual(
+            event.user,
+            self.super_admin,
+        )
+        self.assertEqual(
+            event.user_agent,
+            "Test-Audit-Create",
+        )
+        self.assertEqual(
+            event.request_path,
+            "/api/v1/employees/",
+        )
+        self.assertIn(
+            "EMP-003",
+            event.details,
+        )
+
+    def test_employee_update_creates_security_event(self):
+        """Updating an employee creates an audit event."""
+
+        self.authenticate(self.super_admin)
+
+        self.client.defaults["HTTP_USER_AGENT"] = (
+            "Test-Audit-Update"
+        )
+
+        response = self.client.patch(
+            f"{self.url}{self.profile.id}/",
+            {
+                "job_title": "Senior Software Engineer",
+            },
+            format="json",
+        )
+
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_200_OK,
+        )
+
+        event = SecurityEvent.objects.filter(
+            event_type="EMPLOYEE_UPDATED"
+        ).latest("created_at")
+
+        self.assertEqual(
+            event.user,
+            self.super_admin,
+        )
+        self.assertEqual(
+            event.user_agent,
+            "Test-Audit-Update",
+        )
+        self.assertEqual(
+            event.request_path,
+            f"/api/v1/employees/{self.profile.id}/",
+        )
+        self.assertIn(
+            "EMP-001",
+            event.details,
+        )
+
+    def test_employee_deletion_creates_security_event(self):
+        """Deleting an employee creates an audit event."""
+
+        self.authenticate(self.super_admin)
+
+        self.client.defaults["HTTP_USER_AGENT"] = (
+            "Test-Audit-Delete"
+        )
+
+        employee_id = self.profile.employee_id
+        profile_id = self.profile.id
+
+        response = self.client.delete(
+            f"{self.url}{profile_id}/"
+        )
+
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_204_NO_CONTENT,
+        )
+
+        event = SecurityEvent.objects.filter(
+            event_type="EMPLOYEE_DELETED"
+        ).latest("created_at")
+
+        self.assertEqual(
+            event.user,
+            self.super_admin,
+        )
+        self.assertEqual(
+            event.user_agent,
+            "Test-Audit-Delete",
+        )
+        self.assertEqual(
+            event.request_path,
+            f"/api/v1/employees/{profile_id}/",
+        )
+        self.assertIn(
+            employee_id,
+            event.details,
         )
