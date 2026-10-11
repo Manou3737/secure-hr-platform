@@ -3,9 +3,15 @@ from datetime import timedelta
 from django.utils import timezone
 
 from .models import SecurityEvent
+from .siem import create_security_event
 
 
-def detect_brute_force(ip_address, threshold=5, window_minutes=5):
+def detect_brute_force(
+    request,
+    ip_address,
+    threshold=5,
+    window_minutes=5,
+):
     """Detect repeated failed login attempts from one IP address."""
 
     window_start = timezone.now() - timedelta(
@@ -26,9 +32,9 @@ def detect_brute_force(ip_address, threshold=5, window_minutes=5):
         ).exists()
 
         if not already_detected:
-            SecurityEvent.objects.create(
+            create_security_event(
+                request=request,
                 event_type="BRUTE_FORCE_DETECTED",
-                ip_address=ip_address,
                 details=(
                     f"{failed_attempts} failed login attempts "
                     f"within {window_minutes} minutes."
@@ -40,7 +46,12 @@ def detect_brute_force(ip_address, threshold=5, window_minutes=5):
     return False
 
 
-def detect_suspicious_ip(ip_address, threshold=10, window_minutes=10):
+def detect_suspicious_ip(
+    request,
+    ip_address,
+    threshold=10,
+    window_minutes=10,
+):
     """Detect excessive security events from one IP address."""
 
     window_start = timezone.now() - timedelta(
@@ -60,9 +71,9 @@ def detect_suspicious_ip(ip_address, threshold=10, window_minutes=10):
         ).exists()
 
         if not already_detected:
-            SecurityEvent.objects.create(
+            create_security_event(
+                request=request,
                 event_type="SUSPICIOUS_IP_DETECTED",
-                ip_address=ip_address,
                 details=(
                     f"{event_count} security events from this IP "
                     f"within {window_minutes} minutes."

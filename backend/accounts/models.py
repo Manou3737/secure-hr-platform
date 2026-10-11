@@ -173,6 +173,13 @@ class SecurityEvent(models.Model):
         ("UNAUTHORIZED_ACCESS", "Unauthorized Access"),
         ("PRIVILEGE_ESCALATION", "Privilege Escalation"),
         ("SUSPICIOUS_IP_DETECTED", "Suspicious IP Detected"),
+        ("EMPLOYEE_CREATED", "Employee Created"),
+        ("EMPLOYEE_UPDATED", "Employee Updated"),
+        ("EMPLOYEE_DELETED", "Employee Deleted"),
+        ("LEAVE_REQUEST_CREATED", "Leave Request Created"),
+        ("LEAVE_REQUEST_APPROVED", "Leave Request Approved"),
+        ("LEAVE_REQUEST_REJECTED", "Leave Request Rejected"),
+        ("LEAVE_REQUEST_CANCELLED", "Leave Request Cancelled"),
     )
 
     user = models.ForeignKey(

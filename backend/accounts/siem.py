@@ -1,20 +1,19 @@
 import json
+import logging
 from pathlib import Path
 
 from django.conf import settings
 from django.utils import timezone
-
+from unittest.mock import patch
 from .models import SecurityEvent
 
-
+logger = logging.getLogger(__name__)
 def get_client_ip(request):
-    """Return the client's IP address from the request."""
+    """Return the direct client IP address.
 
-    forwarded_for = request.META.get("HTTP_X_FORWARDED_FOR")
-
-    if forwarded_for:
-        return forwarded_for.split(",")[0].strip()
-
+    Forwarded headers are not trusted unless a trusted-proxy
+    configuration is explicitly implemented.
+    """
     return request.META.get("REMOTE_ADDR")
 
 
@@ -68,7 +67,14 @@ def create_security_event(
         request_path=request.path,
         details=details or "",
     )
-
-    _write_siem_log(event)
+    try:
+        _write_siem_log(event)
+    except OSError:
+        logger.exception(
+            "Failed to write security event to the SIEM file. "
+            "Event ID: %s, event type: %s",
+            event.pk,
+            event.event_type,
+        )
 
     return event

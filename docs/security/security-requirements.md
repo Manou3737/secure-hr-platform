@@ -674,3 +674,85 @@ The security architecture shall connect:
 → Static Analysis
 → Container Security
 → CI/CD Security
+
+---
+
+## 28. Software and Data Integrity Requirements (OWASP A08)
+
+The Secure HR Platform shall protect the integrity of application dependencies, authentication tokens, database schema changes, and security-sensitive data.
+
+### 28.1 Dependency Integrity
+
+The project shall:
+
+* Pin direct application dependencies to explicit versions.
+* Maintain a dependency lockfile containing cryptographic hashes for the resolved dependencies.
+* Verify dependency hashes when installing packages from the lockfile.
+* Audit installed dependencies for known vulnerabilities.
+* Update vulnerable dependencies through a controlled process.
+* Avoid installing unverified packages from untrusted sources.
+
+Dependency integrity shall be validated using automated dependency auditing and hash verification.
+
+### 28.2 Authentication Token Integrity
+
+JWT-based authentication shall enforce token signature validation and expiration checks.
+
+The platform shall:
+
+* Reject tokens with invalid signatures.
+* Reject expired access and refresh tokens.
+* Rotate refresh tokens according to the configured token lifecycle.
+* Invalidate previously rotated refresh tokens.
+* Blacklist refresh tokens during logout where supported.
+* Prevent clients from changing token claims without invalidating the token signature.
+
+Automated security tests shall verify token tampering rejection, token expiration, refresh-token rotation, and logout invalidation.
+
+### 28.3 Database Schema and Migration Integrity
+
+Database schema changes shall be managed through version-controlled Django migrations.
+
+The project shall:
+
+* Maintain migration files for application model changes.
+* Apply migrations through controlled deployment procedures.
+* Detect model changes that have not been captured in migrations.
+* Validate migration status before deployment.
+* Avoid undocumented manual schema changes.
+
+Migration consistency shall be checked using Django migration inspection and validation commands.
+
+### 28.4 Data Integrity and Validation
+
+Security-sensitive data shall be validated before persistence.
+
+The platform shall:
+
+* Enforce serializer-level and model-level validation where appropriate.
+* Enforce business rules on the server side.
+* Prevent unauthorized modification of protected records.
+* Protect sensitive financial data against unauthorized disclosure and modification.
+* Ensure security logs do not expose credentials, access tokens, or complete bank account details.
+
+Automated regression tests shall verify relevant validation, authorization, and sensitive-data protection controls.
+
+### 28.5 Unsafe Deserialization and File Processing
+
+The application shall not deserialize untrusted data using unsafe mechanisms.
+
+If file uploads or external serialized data processing are introduced, the implementation shall include appropriate validation, integrity checks where applicable, and security testing before release.
+
+### 28.6 Verification and Evidence
+
+The following checks shall be performed as applicable:
+
+* Dependency vulnerability audit.
+* Hash-verified dependency installation.
+* JWT signature and lifecycle security tests.
+* Django migration consistency checks.
+* Regression tests for data validation and access control.
+
+Results shall be recorded in the security testing evidence and OWASP control-to-test matrix.
+
+A control shall only be marked as passed when its relevant implementation and verification evidence have been reviewed.

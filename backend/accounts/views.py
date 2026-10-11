@@ -166,6 +166,7 @@ class LoginViewSet(viewsets.ViewSet):
         ip_address = get_client_ip(request)
 
         detect_suspicious_ip(
+             request,
             ip_address
         )
 
@@ -194,7 +195,8 @@ class LoginViewSet(viewsets.ViewSet):
             )
 
             detect_brute_force(
-                ip_address
+                request,
+                ip_address,
             )
 
             raise
@@ -435,16 +437,10 @@ class AccountStatusViewSet(viewsets.ViewSet):
                 status=status.HTTP_404_NOT_FOUND,
             )
 
-        if not self.check_object_permissions(
+        self.check_object_permissions(
             request,
             user,
-        ):
-            return Response(
-                {
-                    "detail": "You do not have permission to modify this account."
-                },
-                status=status.HTTP_403_FORBIDDEN,
-            )
+        )
 
         serializer = serializers.AccountStatusSerializer(
             data=request.data
@@ -519,17 +515,28 @@ class PrivilegeManagementViewSet(viewsets.ViewSet):
         )
 
         changes = {}
+        privilege_escalation = False
 
         if "is_staff" in serializer.validated_data:
-            user.is_staff = serializer.validated_data[
+            new_is_staff = serializer.validated_data[
                 "is_staff"
             ]
+
+            if not user.is_staff and new_is_staff:
+                privilege_escalation = True
+
+            user.is_staff = new_is_staff
             changes["is_staff"] = user.is_staff
 
         if "is_superuser" in serializer.validated_data:
-            user.is_superuser = serializer.validated_data[
+            new_is_superuser = serializer.validated_data[
                 "is_superuser"
             ]
+
+            if not user.is_superuser and new_is_superuser:
+                privilege_escalation = True
+
+            user.is_superuser = new_is_superuser
             changes["is_superuser"] = user.is_superuser
 
         user.save()
@@ -543,15 +550,16 @@ class PrivilegeManagementViewSet(viewsets.ViewSet):
             ),
         )
 
-        create_security_event(
-            request=request,
-            user=request.user,
-            event_type="PRIVILEGE_ESCALATION",
-            details=(
-                f"Administrative privileges changed "
-                f"for user {user.email}: {changes}"
-            ),
-        )
+        if privilege_escalation:
+            create_security_event(
+                request=request,
+                user=request.user,
+                event_type="PRIVILEGE_ESCALATION",
+                details=(
+                    f"Administrative privileges escalated "
+                    f"for user {user.email}: {changes}"
+                ),
+            )
 
         return Response(
             {
