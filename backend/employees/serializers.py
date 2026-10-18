@@ -1,5 +1,15 @@
 from rest_framework import serializers
 
+import uuid
+from employees.storage import hr_document_storage
+from django.db import transaction
+
+from employees.antivirus import (
+    AntivirusUnavailable,
+    MalwareDetected,
+    scan_uploaded_file,
+)
+
 from .models import (
     LeaveRequest,
     Department,
@@ -13,8 +23,9 @@ from .models import (
     BankAccount,
     PerformanceReview,
     Position,
+    HRDocument,
 )
-
+import hashlib
 
 class EmployeeProfileSerializer(serializers.ModelSerializer):
     """Serialize employee HR profile data."""
@@ -146,12 +157,12 @@ class BankAccountSerializer(serializers.ModelSerializer):
             "updated_at",
         )
 
-    def get_masked_routing_number(self, obj):
+    def get_masked_routing_number(self, obj) -> str :
         """Return only the last four digits of the routing number."""
 
         return f"*****{obj.routing_number[-4:]}"
 
-    def get_masked_account_number(self, obj):
+    def get_masked_account_number(self, obj) -> str :
         """Return only the last four digits of the account number."""
 
         return f"****{obj.last_four}"
@@ -214,3 +225,160 @@ class PerformanceReviewSerializer(serializers.ModelSerializer):
             )
 
         return attrs
+
+class HRDocumentSerializer(serializers.ModelSerializer):
+    """Serialize HR document metadata without exposing storage details."""
+    document_file = serializers.FileField(
+        write_only=True,
+        required=True,
+    )
+
+    MAX_FILE_SIZE = 10 * 1024 * 1024
+
+    ALLOWED_FILE_SIGNATURES = {
+        ".pdf": b"%PDF-",
+        ".png": b"\x89PNG\r\n\x1a\n",
+        ".jpg": b"\xff\xd8\xff",
+        ".jpeg": b"\xff\xd8\xff",
+    }
+
+    def validate_document_file(self, uploaded_file):
+        """Validate the uploaded file's size, extension and signature."""
+
+        if uploaded_file.size == 0:
+            raise serializers.ValidationError(
+                "The uploaded file cannot be empty."
+            )
+
+        if uploaded_file.size > self.MAX_FILE_SIZE:
+            raise serializers.ValidationError(
+                "The maximum allowed file size is 10 MB."
+            )
+
+        filename = uploaded_file.name or ""
+        extension = (
+            "." + filename.rsplit(".", 1)[-1].lower()
+            if "." in filename
+            else ""
+        )
+
+        expected_signature = self.ALLOWED_FILE_SIGNATURES.get(
+            extension
+        )
+
+        if expected_signature is None:
+            raise serializers.ValidationError(
+                "Only PDF, PNG and JPEG files are allowed."
+            )
+
+        uploaded_file.seek(0)
+        signature = uploaded_file.read(len(expected_signature))
+        uploaded_file.seek(0)
+
+        if not signature.startswith(expected_signature):
+            raise serializers.ValidationError(
+                "The file content does not match its extension."
+            )
+
+        return uploaded_file
+
+    def create(self, validated_data):
+        """Store the document and apply the antivirus scan lifecycle."""
+        uploaded_file = validated_data.pop("document_file")
+
+        original_filename = uploaded_file.name
+        mime_type = uploaded_file.content_type or (
+            "application/octet-stream"
+        )
+        size_bytes = uploaded_file.size
+
+        sha256 = hashlib.sha256()
+        uploaded_file.seek(0)
+        for chunk in uploaded_file.chunks():
+            sha256.update(chunk)
+        checksum_sha256 = sha256.hexdigest()
+
+        extension = (
+            original_filename.rsplit(".", 1)[-1].lower()
+            if "." in original_filename
+            else ""
+        )
+        storage_key = (
+            f"hr-documents/{uuid.uuid4().hex}.{extension}"
+            if extension
+            else f"hr-documents/{uuid.uuid4().hex}"
+        )
+
+        uploaded_file.seek(0)
+        saved_key = hr_document_storage.save(
+            storage_key,
+            uploaded_file,
+        )
+
+        try:
+            with transaction.atomic():
+                document = HRDocument.objects.create(
+                    **validated_data,
+                    storage_key=saved_key,
+                    original_filename=original_filename,
+                    mime_type=mime_type,
+                    size_bytes=size_bytes,
+                    checksum_sha256=checksum_sha256,
+                    status=HRDocument.Status.PENDING_SCAN,
+                )
+        except Exception:
+            hr_document_storage.delete(saved_key)
+            raise
+
+        try:
+            uploaded_file.seek(0)
+            scan_uploaded_file(uploaded_file)
+        except MalwareDetected:
+            document.status = HRDocument.Status.QUARANTINED
+            document.save(update_fields=["status", "updated_at"])
+        except AntivirusUnavailable:
+            # Keep the document pending for a future scan retry.
+            pass
+        else:
+            document.status = HRDocument.Status.PENDING_REVIEW
+            document.save(update_fields=["status", "updated_at"])
+
+        return document
+
+    class Meta:
+        model = HRDocument
+        fields = (
+            "id",
+            "employee",
+            "title",
+            "document_file",
+            "document_type",
+            "original_filename",
+            "mime_type",
+            "size_bytes",
+            "checksum_sha256",
+            "status",
+            "uploaded_by",
+            "verified_by",
+            "uploaded_at",
+            "updated_at",
+            "verified_at",
+            "rejection_reason",
+            "expires_at",
+            "metadata",
+        )
+        read_only_fields = (
+            "id",
+            "employee",
+            "original_filename",
+            "mime_type",
+            "size_bytes",
+            "checksum_sha256",
+            "status",
+            "uploaded_by",
+            "verified_by",
+            "uploaded_at",
+            "updated_at",
+            "verified_at",
+            "rejection_reason",
+        )

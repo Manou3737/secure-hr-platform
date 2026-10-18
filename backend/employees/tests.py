@@ -1,20 +1,26 @@
 from django.test import TestCase
 from datetime import date
 
-from accounts.models import User, SecurityEvent
+from accounts.models import User, SecurityEvent, AuditLog
 
 from rest_framework import status
 from rest_framework.test import APIClient
+
 from django.db.models.deletion import ProtectedError
 from django.db import IntegrityError
 from django.db import connection
+from django.db import transaction
+
+from django.core.files.uploadedfile import SimpleUploadedFile
 from django.core.exceptions import ValidationError
+from employees.storage import hr_document_storage
 from django.utils import timezone
 from django.conf import settings
 from decimal import Decimal
 from .serializers import (
     BankAccountSerializer,
     EmployeeProfileSerializer,
+    HRDocumentSerializer,
     LeaveRequestSerializer,
     PerformanceReviewSerializer,
 )
@@ -32,7 +38,10 @@ from .models import (
     BankAccount,
     PerformanceReview,
     Position,
+    HRDocument,
 )
+from unittest.mock import patch
+from employees.antivirus import AntivirusUnavailable, MalwareDetected
 
 class EmployeeProfileModelTests(TestCase):
     """Tests for the EmployeeProfile model."""
@@ -305,12 +314,12 @@ class EmployeeProfileRBACAPITests(TestCase):
         )
 
         self.assertEqual(
-            len(response.data),
+            len(response.data["results"]),
             1,
         )
 
         self.assertEqual(
-            response.data[0]["employee_id"],
+            response.data["results"][0]["employee_id"],
             "EMP-001",
         )
 
@@ -358,7 +367,7 @@ class EmployeeProfileRBACAPITests(TestCase):
         )
 
         self.assertEqual(
-            len(response.data),
+            len(response.data["results"]),
             2,
         )
 
@@ -534,17 +543,17 @@ class EmployeeProfileRBACAPITests(TestCase):
         )
 
         self.assertEqual(
-            len(response.data),
+            len(response.data["results"]),
             2,
         )
 
         self.assertEqual(
-            response.data[0]["employee_id"],
+            response.data["results"][0]["employee_id"],
             "EMP-002",
         )
 
         self.assertEqual(
-            response.data[1]["employee_id"],
+            response.data["results"][1]["employee_id"],
             "EMP-001",
         )
 
@@ -562,13 +571,13 @@ class EmployeeProfileRBACAPITests(TestCase):
         )
 
         self.assertEqual(
-            len(response.data),
+            len(response.data["results"]),
             2,
         )
 
         returned_ids = [
             profile["employee_id"]
-            for profile in response.data
+            for profile in response.data["results"]
         ]
 
         self.assertEqual(
@@ -590,13 +599,13 @@ class EmployeeProfileRBACAPITests(TestCase):
         )
 
         self.assertEqual(
-            len(response.data),
+            len(response.data["results"]),
             2,
         )
 
         returned_ids = [
             profile["employee_id"]
-            for profile in response.data
+            for profile in response.data["results"]
         ]
 
         self.assertEqual(
@@ -619,7 +628,7 @@ class EmployeeProfileRBACAPITests(TestCase):
 
         returned_ids = [
             profile["employee_id"]
-            for profile in response.data
+            for profile in response.data["results"]
         ]
 
         self.assertEqual(
@@ -644,12 +653,12 @@ class EmployeeProfileRBACAPITests(TestCase):
         )
 
         self.assertEqual(
-            len(response.data),
+            len(response.data["results"]),
             1,
         )
 
         self.assertEqual(
-            response.data[0]["employee_id"],
+            response.data["results"][0]["employee_id"],
             "EMP-001",
         )
 
@@ -669,17 +678,17 @@ class EmployeeProfileRBACAPITests(TestCase):
         )
 
         self.assertEqual(
-            len(response.data),
+            len(response.data["results"]),
             2,
         )
 
         self.assertEqual(
-            response.data[0]["employee_id"],
+            response.data["results"][0]["employee_id"],
             "EMP-002",
         )
 
         self.assertEqual(
-            response.data[1]["employee_id"],
+            response.data["results"][1]["employee_id"],
             "EMP-001",
         )
 
@@ -837,12 +846,12 @@ class EmployeeProfileRBACAPITests(TestCase):
         )
 
         self.assertEqual(
-            len(response.data),
+            len(response.data["results"]),
             1,
         )
 
         self.assertEqual(
-            response.data[0]["employee_id"],
+            response.data["results"][0]["employee_id"],
             "EMP-001",
         )
 
@@ -860,12 +869,12 @@ class EmployeeProfileRBACAPITests(TestCase):
         )
 
         self.assertEqual(
-            len(response.data),
+            len(response.data["results"]),
             1,
         )
 
         self.assertEqual(
-            response.data[0]["employee_id"],
+            response.data["results"][0]["employee_id"],
             "EMP-002",
         )
 
@@ -883,12 +892,12 @@ class EmployeeProfileRBACAPITests(TestCase):
         )
 
         self.assertEqual(
-            len(response.data),
+            len(response.data["results"]),
             1,
         )
 
         self.assertEqual(
-            response.data[0]["employee_id"],
+            response.data["results"][0]["employee_id"],
             "EMP-001",
         )
 
@@ -906,17 +915,17 @@ class EmployeeProfileRBACAPITests(TestCase):
         )
 
         self.assertEqual(
-            len(response.data),
+            len(response.data["results"]),
             2,
         )
 
         self.assertEqual(
-            response.data[0]["employee_id"],
+            response.data["results"][0]["employee_id"],
             "EMP-001",
         )
 
         self.assertEqual(
-            response.data[1]["employee_id"],
+            response.data["results"][1]["employee_id"],
             "EMP-002",
         )
 
@@ -1554,12 +1563,12 @@ class LeaveRequestRBACAPITests(TestCase):
         )
 
         self.assertEqual(
-            len(response.data),
+            len(response.data["results"]),
             1,
         )
 
         self.assertEqual(
-            response.data[0]["employee"],
+            response.data["results"][0]["employee"],
             self.employee_profile.id,
         )
 
@@ -1686,7 +1695,7 @@ class LeaveRequestRBACAPITests(TestCase):
         )
 
         self.assertEqual(
-            len(response.data),
+            len(response.data["results"]),
             2,
         )
 
@@ -1949,12 +1958,12 @@ class LeaveRequestRBACAPITests(TestCase):
         )
 
         self.assertEqual(
-            len(response.data),
+            len(response.data["results"]),
             1,
         )
 
         self.assertEqual(
-            response.data[0]["id"],
+            response.data["results"][0]["id"],
             self.leave_request.id,
         )
 
@@ -1972,7 +1981,7 @@ class LeaveRequestRBACAPITests(TestCase):
         )
 
         self.assertEqual(
-            len(response.data),
+            len(response.data["results"]),
             2,
         )
 
@@ -1990,12 +1999,12 @@ class LeaveRequestRBACAPITests(TestCase):
         )
 
         self.assertEqual(
-            len(response.data),
+            len(response.data["results"]),
             1,
         )
 
         self.assertEqual(
-            response.data[0]["id"],
+            response.data["results"][0]["id"],
             self.leave_request.id,
         )
 
@@ -2013,12 +2022,12 @@ class LeaveRequestRBACAPITests(TestCase):
         )
 
         self.assertEqual(
-            len(response.data),
+            len(response.data["results"]),
             1,
         )
 
         self.assertEqual(
-            response.data[0]["id"],
+            response.data["results"][0]["id"],
             self.other_leave_request.id,
         )
 
@@ -2036,12 +2045,12 @@ class LeaveRequestRBACAPITests(TestCase):
         )
 
         self.assertEqual(
-            len(response.data),
+            len(response.data["results"]),
             1,
         )
 
         self.assertEqual(
-            response.data[0]["id"],
+            response.data["results"][0]["id"],
             self.leave_request.id,
         )
 
@@ -2059,17 +2068,17 @@ class LeaveRequestRBACAPITests(TestCase):
         )
 
         self.assertEqual(
-            len(response.data),
+            len(response.data["results"]),
             2,
         )
 
         self.assertEqual(
-            response.data[0]["id"],
+            response.data["results"][0]["id"],
             self.leave_request.id,
         )
 
         self.assertEqual(
-            response.data[1]["id"],
+            response.data["results"][1]["id"],
             self.other_leave_request.id,
         )
 
@@ -2087,17 +2096,17 @@ class LeaveRequestRBACAPITests(TestCase):
         )
 
         self.assertEqual(
-            len(response.data),
+            len(response.data["results"]),
             2,
         )
 
         self.assertEqual(
-            response.data[0]["id"],
+            response.data["results"][0]["id"],
             self.other_leave_request.id,
         )
 
         self.assertEqual(
-            response.data[1]["id"],
+            response.data["results"][1]["id"],
             self.leave_request.id,
         )
 
@@ -2115,13 +2124,13 @@ class LeaveRequestRBACAPITests(TestCase):
         )
 
         self.assertEqual(
-            len(response.data),
+            len(response.data["results"]),
             2,
         )
 
         returned_ids = [
             leave["id"]
-            for leave in response.data
+            for leave in response.data["results"]
         ]
 
         self.assertEqual(
@@ -2146,13 +2155,13 @@ class LeaveRequestRBACAPITests(TestCase):
         )
 
         self.assertEqual(
-            len(response.data),
+            len(response.data["results"]),
             2,
         )
 
         returned_ids = [
             leave["id"]
-            for leave in response.data
+            for leave in response.data["results"]
         ]
 
         self.assertEqual(
@@ -2177,7 +2186,7 @@ class LeaveRequestRBACAPITests(TestCase):
         )
 
         self.assertEqual(
-            len(response.data),
+            len(response.data["results"]),
             2,
         )
 
@@ -2198,12 +2207,12 @@ class LeaveRequestRBACAPITests(TestCase):
         )
 
         self.assertEqual(
-            len(response.data),
+            len(response.data["results"]),
             1,
         )
 
         self.assertEqual(
-            response.data[0]["id"],
+            response.data["results"][0]["id"],
             self.leave_request.id,
         )
 
@@ -4176,12 +4185,12 @@ class BankAccountViewSetTests(TestCase):
         )
 
         self.assertEqual(
-            len(response.data),
+            len(response.data["results"]),
             1,
         )
 
         self.assertEqual(
-            response.data[0]["account_type"],
+            response.data["results"][0]["account_type"],
             "SAVINGS",
         )
 
@@ -4207,12 +4216,12 @@ class BankAccountViewSetTests(TestCase):
         )
 
         self.assertEqual(
-            len(response.data),
+            len(response.data["results"]),
             1,
         )
 
         self.assertTrue(
-            response.data[0]["is_primary"],
+            response.data["results"][0]["is_primary"],
         )
 
     def test_bank_accounts_can_be_filtered_by_is_verified(self):
@@ -4237,12 +4246,12 @@ class BankAccountViewSetTests(TestCase):
         )
 
         self.assertEqual(
-            len(response.data),
+            len(response.data["results"]),
             1,
         )
 
         self.assertTrue(
-            response.data[0]["is_verified"],
+            response.data["results"][0]["is_verified"],
         )
 
     def test_bank_accounts_can_be_filtered_by_employee(self):
@@ -4259,12 +4268,12 @@ class BankAccountViewSetTests(TestCase):
         )
 
         self.assertEqual(
-            len(response.data),
+            len(response.data["results"]),
             1,
         )
 
         self.assertEqual(
-            response.data[0]["id"],
+            response.data["results"][0]["id"],
             self.bank_account.id,
         )
 
@@ -4289,13 +4298,13 @@ class BankAccountViewSetTests(TestCase):
         )
 
         self.assertEqual(
-            len(response.data),
+            len(response.data["results"]),
             2,
         )
 
         returned_ids = [
             account["id"]
-            for account in response.data
+            for account in response.data["results"]
         ]
 
         self.assertEqual(
@@ -4327,13 +4336,13 @@ class BankAccountViewSetTests(TestCase):
         )
 
         self.assertEqual(
-            len(response.data),
+            len(response.data["results"]),
             2,
         )
 
         returned_ids = [
             account["id"]
-            for account in response.data
+            for account in response.data["results"]
         ]
 
         self.assertEqual(
@@ -4365,13 +4374,13 @@ class BankAccountViewSetTests(TestCase):
         )
 
         self.assertEqual(
-            len(response.data),
+            len(response.data["results"]),
             2,
         )
 
         returned_last_four = [
             account["last_four"]
-            for account in response.data
+            for account in response.data["results"]
         ]
 
         self.assertEqual(
@@ -4396,12 +4405,12 @@ class BankAccountViewSetTests(TestCase):
         )
 
         self.assertEqual(
-            len(response.data),
+            len(response.data["results"]),
             1,
         )
 
         self.assertEqual(
-            response.data[0]["id"],
+            response.data["results"][0]["id"],
             self.bank_account.id,
         )
 
@@ -4662,6 +4671,134 @@ class PerformanceReviewViewSetTests(TestCase):
         self.assertEqual(
             self.review.score,
             Decimal("4.75"),
+        )
+
+    def test_employee_cannot_update_submitted_review(self):
+        self.review.status = "SUBMITTED"
+        self.review.submitted_at = timezone.now()
+        self.review.save()
+
+        self.authenticate(self.employee_user)
+
+        response = self.client.patch(
+            f"{self.url}{self.review.id}/",
+            {
+                "score": "4.75",
+                "comments": "Unauthorized post-submission change.",
+            },
+            format="json",
+        )
+
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_400_BAD_REQUEST,
+        )
+
+        self.review.refresh_from_db()
+
+        self.assertEqual(
+            self.review.score,
+            Decimal("4.50"),
+        )
+        self.assertEqual(
+            self.review.comments,
+            "Strong performance.",
+        )
+
+    def test_employee_cannot_update_acknowledged_review(self):
+        self.review.status = "ACKNOWLEDGED"
+        self.review.submitted_at = timezone.now()
+        self.review.save()
+
+        self.authenticate(self.employee_user)
+
+        response = self.client.patch(
+            f"{self.url}{self.review.id}/",
+            {
+                "score": "4.75",
+                "comments": "Unauthorized acknowledged change.",
+            },
+            format="json",
+        )
+
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_400_BAD_REQUEST,
+        )
+
+        self.review.refresh_from_db()
+
+        self.assertEqual(
+            self.review.score,
+            Decimal("4.50"),
+        )
+        self.assertEqual(
+            self.review.comments,
+            "Strong performance.",
+        )
+
+    def test_hr_manager_can_correct_submitted_review(self):
+        self.review.status = "SUBMITTED"
+        self.review.submitted_at = timezone.now()
+        self.review.save()
+
+        self.authenticate(self.hr_manager)
+
+        response = self.client.patch(
+            f"{self.url}{self.review.id}/",
+            {
+                "score": "4.75",
+                "comments": "Corrected by HR Manager.",
+            },
+            format="json",
+        )
+
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_200_OK,
+        )
+
+        self.review.refresh_from_db()
+
+        self.assertEqual(
+            self.review.score,
+            Decimal("4.75"),
+        )
+        self.assertEqual(
+            self.review.comments,
+            "Corrected by HR Manager.",
+        )
+
+    def test_hr_admin_can_correct_submitted_review(self):
+        self.review.status = "SUBMITTED"
+        self.review.submitted_at = timezone.now()
+        self.review.save()
+
+        self.authenticate(self.hr_admin)
+
+        response = self.client.patch(
+            f"{self.url}{self.review.id}/",
+            {
+                "score": "4.75",
+                "comments": "Corrected by HR Admin.",
+            },
+            format="json",
+        )
+
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_200_OK,
+        )
+
+        self.review.refresh_from_db()
+
+        self.assertEqual(
+            self.review.score,
+            Decimal("4.75"),
+        )
+        self.assertEqual(
+            self.review.comments,
+            "Corrected by HR Admin.",
         )
 
     def test_employee_cannot_update_other_employee_review(self):
@@ -4982,11 +5119,11 @@ class PerformanceReviewViewSetTests(TestCase):
             status.HTTP_200_OK,
         )
         self.assertEqual(
-            len(response.data),
+            len(response.data["results"]),
             1,
         )
         self.assertEqual(
-            response.data[0]["id"],
+            response.data["results"][0]["id"],
             self.review.id,
         )
 
@@ -5003,7 +5140,7 @@ class PerformanceReviewViewSetTests(TestCase):
             status.HTTP_200_OK,
         )
         self.assertEqual(
-            len(response.data),
+            len(response.data["results"]),
             2,
         )
 
@@ -5020,7 +5157,7 @@ class PerformanceReviewViewSetTests(TestCase):
             status.HTTP_200_OK,
         )
         self.assertEqual(
-            len(response.data),
+            len(response.data["results"]),
             2,
         )
 
@@ -5037,7 +5174,7 @@ class PerformanceReviewViewSetTests(TestCase):
             status.HTTP_200_OK,
         )
         self.assertEqual(
-            len(response.data),
+            len(response.data["results"]),
             2,
         )
 
@@ -5054,7 +5191,7 @@ class PerformanceReviewViewSetTests(TestCase):
             status.HTTP_200_OK,
         )
         self.assertEqual(
-            len(response.data),
+            len(response.data["results"]),
             2,
         )
 
@@ -5071,15 +5208,15 @@ class PerformanceReviewViewSetTests(TestCase):
             status.HTTP_200_OK,
         )
         self.assertEqual(
-            len(response.data),
+            len(response.data["results"]),
             2,
         )
         self.assertEqual(
-            response.data[0]["id"],
+            response.data["results"][0]["id"],
             self.review.id,
         )
         self.assertEqual(
-            response.data[1]["id"],
+            response.data["results"][1]["id"],
             self.other_review.id,
         )
 
@@ -5098,7 +5235,7 @@ class PerformanceReviewViewSetTests(TestCase):
             status.HTTP_200_OK,
         )
         self.assertEqual(
-            len(response.data),
+            len(response.data["results"]),
             2,
         )
 
@@ -5115,15 +5252,15 @@ class PerformanceReviewViewSetTests(TestCase):
             status.HTTP_200_OK,
         )
         self.assertEqual(
-            len(response.data),
+            len(response.data["results"]),
             2,
         )
         self.assertEqual(
-            response.data[0]["id"],
+            response.data["results"][0]["id"],
             self.other_review.id,
         )
         self.assertEqual(
-            response.data[1]["id"],
+            response.data["results"][1]["id"],
             self.review.id,
         )
 
@@ -5140,15 +5277,15 @@ class PerformanceReviewViewSetTests(TestCase):
             status.HTTP_200_OK,
         )
         self.assertEqual(
-            len(response.data),
+            len(response.data["results"]),
             2,
         )
         self.assertEqual(
-            response.data[0]["id"],
+            response.data["results"][0]["id"],
             self.review.id,
         )
         self.assertEqual(
-            response.data[1]["id"],
+            response.data["results"][1]["id"],
             self.other_review.id,
         )
 
@@ -5165,15 +5302,15 @@ class PerformanceReviewViewSetTests(TestCase):
             status.HTTP_200_OK,
         )
         self.assertEqual(
-            len(response.data),
+            len(response.data["results"]),
             2,
         )
         self.assertEqual(
-            response.data[0]["id"],
+            response.data["results"][0]["id"],
             self.review.id,
         )
         self.assertEqual(
-            response.data[1]["id"],
+            response.data["results"][1]["id"],
             self.other_review.id,
         )
 
@@ -5190,7 +5327,7 @@ class PerformanceReviewViewSetTests(TestCase):
             status.HTTP_200_OK,
         )
         self.assertEqual(
-            len(response.data),
+            len(response.data["results"]),
             2,
         )
 
@@ -5210,11 +5347,11 @@ class PerformanceReviewViewSetTests(TestCase):
             status.HTTP_200_OK,
         )
         self.assertEqual(
-            len(response.data),
+            len(response.data["results"]),
             1,
         )
         self.assertEqual(
-            response.data[0]["id"],
+            response.data["results"][0]["id"],
             self.review.id,
         )
 
@@ -5253,3 +5390,1005 @@ class PerformanceReviewViewSetTests(TestCase):
             response.status_code,
             status.HTTP_400_BAD_REQUEST,
         )
+
+class HRDocumentModelTests(TestCase):
+    """Tests for the HRDocument model."""
+
+    def setUp(self):
+        self.user = User.objects.create_user(
+            email="document-owner@example.com",
+            name="Document Owner",
+            password="TestPass123!",
+        )
+
+        self.department = Department.objects.create(
+            name="Document Department",
+            code="DOC",
+        )
+
+        self.position = Position.objects.create(
+            title="Document Employee",
+            department=self.department,
+        )
+
+        self.profile = EmployeeProfile.objects.create(
+            user=self.user,
+            employee_id="DOC-001",
+            department=self.department,
+            position=self.position,
+            hire_date=date(2026, 1, 15),
+        )
+
+        self.document = HRDocument.objects.create(
+            employee=self.profile,
+            title="Employment Contract",
+            document_type=HRDocument.DocumentType.EMPLOYMENT_CONTRACT,
+            original_filename="contract.pdf",
+            storage_key="hr-documents/test/contract.pdf",
+            mime_type="application/pdf",
+            size_bytes=1024,
+            uploaded_by=self.user,
+        )
+
+    def test_document_is_created_with_uuid(self):
+        self.assertIsNotNone(self.document.id)
+        self.assertEqual(self.document.employee, self.profile)
+        self.assertEqual(self.document.uploaded_by, self.user)
+
+    def test_document_defaults_to_pending_scan(self):
+        self.assertEqual(
+            self.document.status,
+            HRDocument.Status.PENDING_SCAN,
+        )
+
+    def test_document_metadata_defaults_to_empty_dictionary(self):
+        self.assertEqual(self.document.metadata, {})
+
+    def test_document_string_representation(self):
+        self.assertEqual(
+            str(self.document),
+            "Employment Contract (DOC-001)",
+        )
+
+    def test_storage_key_must_be_unique(self):
+        with self.assertRaises(IntegrityError):
+            with transaction.atomic():
+                HRDocument.objects.create(
+                    employee=self.profile,
+                    title="Duplicate Storage Key",
+                    document_type=HRDocument.DocumentType.OTHER,
+                    original_filename="other.pdf",
+                    storage_key="hr-documents/test/contract.pdf",
+                    mime_type="application/pdf",
+                    size_bytes=512,
+                    uploaded_by=self.user,
+                )
+
+    def test_employee_cannot_be_deleted_while_document_exists(self):
+        with self.assertRaises(ProtectedError):
+            self.profile.delete()
+
+    def test_uploader_cannot_be_deleted_while_document_exists(self):
+        with self.assertRaises(ProtectedError):
+            self.user.delete()
+
+    def test_document_type_choices_are_defined(self):
+        expected_types = {
+            "IDENTITY_DOCUMENT",
+            "EMPLOYMENT_CONTRACT",
+            "TAX_FORM",
+            "CERTIFICATION",
+            "POLICY_ACKNOWLEDGMENT",
+            "ONBOARDING_FORM",
+            "OTHER",
+        }
+
+        actual_types = {
+            value
+            for value, label in HRDocument.DocumentType.choices
+        }
+
+        self.assertSetEqual(actual_types, expected_types)
+
+    def test_document_status_choices_are_defined(self):
+        expected_statuses = {
+            "PENDING_SCAN",
+            "PENDING_REVIEW",
+            "VERIFIED",
+            "QUARANTINED",
+            "REJECTED",
+            "ARCHIVED",
+        }
+
+        actual_statuses = {
+            value
+            for value, label in HRDocument.Status.choices
+        }
+
+        self.assertSetEqual(actual_statuses, expected_statuses)
+
+class PrivateHRDocumentStorageTests(TestCase):
+    """Tests ensuring local HR document storage has no public URLs."""
+
+    def test_local_storage_does_not_generate_public_urls(self):
+        from employees.storage import (
+            PrivateHRDocumentFileSystemStorage,
+        )
+
+        storage = hr_document_storage
+
+        if not isinstance(storage, PrivateHRDocumentFileSystemStorage):
+            self.skipTest(
+                "The active storage backend is not local filesystem storage."
+            )
+
+        with self.assertRaisesMessage(
+            ValueError,
+            "Private HR documents do not have public URLs.",
+        ):
+            storage.url("hr-documents/test.pdf")
+
+class HRDocumentSerializerTests(TestCase):
+    """Tests for secure HR document serialization."""
+
+    def setUp(self):
+        self.user = User.objects.create_user(
+            email="serializer-owner@example.com",
+            name="Serializer Owner",
+            password="TestPass123!",
+        )
+
+        self.department = Department.objects.create(
+            name="Serializer Department",
+            code="SER",
+        )
+
+        self.position = Position.objects.create(
+            title="Serializer Employee",
+            department=self.department,
+        )
+
+        self.profile = EmployeeProfile.objects.create(
+            user=self.user,
+            employee_id="SER-001",
+            department=self.department,
+            position=self.position,
+            hire_date=date(2026, 1, 15),
+        )
+
+        self.document = HRDocument.objects.create(
+            employee=self.profile,
+            title="Employment Contract",
+            document_type=HRDocument.DocumentType.EMPLOYMENT_CONTRACT,
+            original_filename="contract.pdf",
+            storage_key="hr-documents/serializer/contract.pdf",
+            mime_type="application/pdf",
+            size_bytes=1024,
+            uploaded_by=self.user,
+        )
+
+    def test_storage_key_is_not_exposed(self):
+        serializer = HRDocumentSerializer(self.document)
+
+        self.assertNotIn("storage_key", serializer.data)
+
+    def test_server_managed_fields_are_read_only(self):
+        serializer = HRDocumentSerializer()
+
+        expected_fields = {
+            "id",
+            "employee",
+            "original_filename",
+            "mime_type",
+            "size_bytes",
+            "checksum_sha256",
+            "status",
+            "uploaded_by",
+            "verified_by",
+            "uploaded_at",
+            "updated_at",
+            "verified_at",
+            "rejection_reason",
+        }
+
+        for field_name in expected_fields:
+            with self.subTest(field=field_name):
+                self.assertTrue(
+                    serializer.fields[field_name].read_only
+                )
+
+    def test_document_metadata_is_serialized(self):
+        serializer = HRDocumentSerializer(self.document)
+
+        self.assertEqual(
+            serializer.data["title"],
+            "Employment Contract",
+        )
+        self.assertEqual(
+            serializer.data["status"],
+            HRDocument.Status.PENDING_SCAN,
+        )
+
+    def test_server_managed_fields_cannot_be_overridden(self):
+        payload = {
+            "employee": self.profile.pk,
+            "status": "VERIFIED",
+            "uploaded_by": self.user.pk,
+            "verified_by": self.user.pk,
+            "original_filename": "fake.pdf",
+            "mime_type": "application/pdf",
+            "size_bytes": 1,
+            "checksum_sha256": "fake-checksum",
+        }
+
+        serializer = HRDocumentSerializer(
+            self.document,
+            data=payload,
+            partial=True,
+        )
+
+        self.assertTrue(serializer.is_valid(), serializer.errors)
+
+        forbidden_fields = {
+            "employee",
+            "status",
+            "uploaded_by",
+            "verified_by",
+            "original_filename",
+            "mime_type",
+            "size_bytes",
+            "checksum_sha256",
+        }
+
+        self.assertTrue(
+            forbidden_fields.isdisjoint(serializer.validated_data.keys()),
+            f"Des champs protégés ont été acceptés : "
+            f"{forbidden_fields.intersection(serializer.validated_data.keys())}",
+        )
+
+    def test_valid_pdf_file_is_accepted(self):
+        uploaded_file = SimpleUploadedFile(
+            "contract.pdf",
+            b"%PDF-1.7 test document content",
+            content_type="application/pdf",
+        )
+
+        serializer = HRDocumentSerializer(
+            instance=self.document,
+            data={"document_file": uploaded_file},
+            partial=True,
+        )
+
+        self.assertTrue(serializer.is_valid(), serializer.errors)
+
+
+    @patch(
+        "employees.serializers.scan_uploaded_file",
+        side_effect=MalwareDetected("Test malware"),
+    )
+    def test_malicious_file_is_quarantined(self, mock_scan):
+        uploaded_file = SimpleUploadedFile(
+            "infected-contract.pdf",
+            b"%PDF-1.7 test document content",
+            content_type="application/pdf",
+        )
+
+        serializer = HRDocumentSerializer(
+            data={
+                "title": "Infected Contract",
+                "document_type": (
+                    HRDocument.DocumentType.EMPLOYMENT_CONTRACT
+                ),
+                "document_file": uploaded_file,
+            },
+        )
+
+        self.assertTrue(serializer.is_valid(), serializer.errors)
+
+        document = serializer.save(
+            employee=self.profile,
+            uploaded_by=self.user,
+        )
+
+        self.assertEqual(
+            document.status,
+            HRDocument.Status.QUARANTINED,
+        )
+        mock_scan.assert_called_once()
+
+
+    @patch(
+        "employees.serializers.scan_uploaded_file",
+        side_effect=AntivirusUnavailable("Scanner unavailable"),
+    )
+    def test_document_remains_pending_scan_when_antivirus_is_unavailable(
+        self,
+        mock_scan,
+    ):
+        uploaded_file = SimpleUploadedFile(
+            "contract-unscanned.pdf",
+            b"%PDF-1.7 test document content",
+            content_type="application/pdf",
+        )
+
+        serializer = HRDocumentSerializer(
+            data={
+                "title": "Unscanned Contract",
+                "document_type": (
+                    HRDocument.DocumentType.EMPLOYMENT_CONTRACT
+                ),
+                "document_file": uploaded_file,
+            },
+        )
+
+        self.assertTrue(serializer.is_valid(), serializer.errors)
+
+        document = serializer.save(
+            employee=self.profile,
+            uploaded_by=self.user,
+        )
+
+        self.assertEqual(
+            document.status,
+            HRDocument.Status.PENDING_SCAN,
+        )
+        mock_scan.assert_called_once()
+
+
+    @patch("employees.serializers.scan_uploaded_file")
+    def test_create_stores_file_and_calculates_sha256(
+        self,
+        mock_scan,
+    ):
+        import hashlib
+        from employees.storage import hr_document_storage
+
+        content = b"%PDF-1.7 test document content"
+        uploaded_file = SimpleUploadedFile(
+            "new-contract.pdf",
+            content,
+            content_type="application/pdf",
+        )
+
+        serializer = HRDocumentSerializer(
+            data={
+                "title": "New Employment Contract",
+                "document_type": (
+                    HRDocument.DocumentType.EMPLOYMENT_CONTRACT
+                ),
+                "document_file": uploaded_file,
+                "metadata": {"source": "test"},
+            },
+            context={"request": type(
+                "Request", (), {"user": self.user}
+            )()},
+        )
+
+        self.assertTrue(serializer.is_valid(), serializer.errors)
+
+        document = serializer.save(
+            employee=self.profile,
+            uploaded_by=self.user,
+        )
+
+        try:
+            self.assertEqual(
+                document.checksum_sha256,
+                hashlib.sha256(content).hexdigest(),
+            )
+            self.assertTrue(hr_document_storage.exists(document.storage_key))
+            self.assertEqual(document.original_filename, "new-contract.pdf")
+            self.assertEqual(document.size_bytes, len(content))
+            self.assertNotIn("storage_key", serializer.data)
+        finally:
+            hr_document_storage.delete(document.storage_key)
+
+    @patch("employees.serializers.scan_uploaded_file")
+    def test_create_removes_stored_file_if_database_creation_fails(
+        self,
+        mock_scan,
+    ):
+        from unittest.mock import patch
+        from employees.storage import hr_document_storage
+
+        uploaded_file = SimpleUploadedFile(
+            "failed-contract.pdf",
+            b"%PDF-1.7 test document content",
+            content_type="application/pdf",
+        )
+
+        serializer = HRDocumentSerializer(
+            data={
+                "title": "Failed Contract",
+                "document_type": (
+                    HRDocument.DocumentType.EMPLOYMENT_CONTRACT
+                ),
+                "document_file": uploaded_file,
+            },
+        )
+
+        self.assertTrue(serializer.is_valid(), serializer.errors)
+
+
+        with patch(
+            "employees.serializers.hr_document_storage.save",
+            wraps=hr_document_storage.save,
+        ) as storage_save:
+            with patch(
+                "employees.serializers.hr_document_storage.delete",
+                wraps=hr_document_storage.delete,
+            ) as storage_delete:
+                with patch(
+                    "employees.serializers.HRDocument.objects.create",
+                    side_effect=RuntimeError(
+                        "Simulated database failure"
+                    ),
+                ):
+                    with self.assertRaises(RuntimeError):
+                        serializer.save(
+                            employee=self.profile,
+                            uploaded_by=self.user,
+                        )
+
+
+        self.assertTrue(storage_save.called)
+        self.assertTrue(storage_delete.called)
+
+        saved_key = storage_delete.call_args.args[0]
+        self.assertIsInstance(saved_key, str)
+        self.assertFalse(hr_document_storage.exists(saved_key))
+
+
+    def test_empty_file_is_rejected(self):
+        uploaded_file = SimpleUploadedFile(
+            "empty.pdf",
+            b"",
+            content_type="application/pdf",
+        )
+
+        serializer = HRDocumentSerializer(
+            instance=self.document,
+            data={"document_file": uploaded_file},
+            partial=True,
+        )
+
+        self.assertFalse(serializer.is_valid())
+        self.assertIn("document_file", serializer.errors)
+
+    def test_unsupported_extension_is_rejected(self):
+        uploaded_file = SimpleUploadedFile(
+            "malware.exe",
+            b"%PDF-1.7 test content",
+            content_type="application/octet-stream",
+        )
+
+        serializer = HRDocumentSerializer(
+            instance=self.document,
+            data={"document_file": uploaded_file},
+            partial=True,
+        )
+
+        self.assertFalse(serializer.is_valid())
+        self.assertIn("document_file", serializer.errors)
+
+    def test_file_signature_must_match_extension(self):
+        uploaded_file = SimpleUploadedFile(
+            "contract.pdf",
+            b"This is not a PDF file",
+            content_type="application/pdf",
+        )
+
+        serializer = HRDocumentSerializer(
+            instance=self.document,
+            data={"document_file": uploaded_file},
+            partial=True,
+        )
+
+        self.assertFalse(serializer.is_valid())
+        self.assertIn("document_file", serializer.errors)
+
+    def test_file_over_10_mb_is_rejected(self):
+        uploaded_file = SimpleUploadedFile(
+            "large.pdf",
+            b"%PDF-" + b"A" * (10 * 1024 * 1024),
+            content_type="application/pdf",
+        )
+
+        serializer = HRDocumentSerializer(
+            instance=self.document,
+            data={"document_file": uploaded_file},
+            partial=True,
+        )
+
+        self.assertFalse(serializer.is_valid())
+        self.assertIn("document_file", serializer.errors)
+
+class HRDocumentRBACAPITests(TestCase):
+    """Tests for HR document API access control."""
+
+    def setUp(self):
+        self.client = APIClient()
+
+        self.super_admin = User.objects.create_user(
+            email="hrdoc-admin@example.com",
+            name="HR Document Super Admin",
+            password="StrongPassword123!",
+            role="SUPER_ADMIN",
+            is_staff=True,
+            is_superuser=True,
+        )
+
+        self.hr_admin = User.objects.create_user(
+            email="hrdoc-hradmin@example.com",
+            name="HR Document HR Admin",
+            password="StrongPassword123!",
+            role="HR_ADMIN",
+        )
+
+        self.hr_manager = User.objects.create_user(
+            email="hrdoc-manager@example.com",
+            name="HR Document HR Manager",
+            password="StrongPassword123!",
+            role="HR_MANAGER",
+        )
+
+        self.employee = User.objects.create_user(
+            email="hrdoc-employee@example.com",
+            name="HR Document Employee",
+            password="StrongPassword123!",
+            role="EMPLOYEE",
+        )
+
+        self.other_employee = User.objects.create_user(
+            email="hrdoc-other@example.com",
+            name="Other HR Document Employee",
+            password="StrongPassword123!",
+            role="EMPLOYEE",
+        )
+
+        self.department = Department.objects.create(
+            name="HR Document Department",
+            code="HRD",
+        )
+
+        self.position = Position.objects.create(
+            title="HR Document Employee",
+            department=self.department,
+        )
+
+        self.profile = EmployeeProfile.objects.create(
+            user=self.employee,
+            employee_id="HRDOC-001",
+            department=self.department,
+            position=self.position,
+            hire_date=date(2026, 1, 15),
+        )
+
+        self.other_profile = EmployeeProfile.objects.create(
+            user=self.other_employee,
+            employee_id="HRDOC-002",
+            department=self.department,
+            position=self.position,
+            hire_date=date(2026, 2, 1),
+        )
+
+        self.document = HRDocument.objects.create(
+            employee=self.profile,
+            title="Employment Contract",
+            document_type=HRDocument.DocumentType.EMPLOYMENT_CONTRACT,
+            original_filename="contract.pdf",
+            storage_key="hr-documents/rbac/contract.pdf",
+            mime_type="application/pdf",
+            size_bytes=1024,
+            uploaded_by=self.hr_admin,
+        )
+
+        self.other_document = HRDocument.objects.create(
+            employee=self.other_profile,
+            title="Other Employee Contract",
+            document_type=HRDocument.DocumentType.EMPLOYMENT_CONTRACT,
+            original_filename="other-contract.pdf",
+            storage_key="hr-documents/rbac/other-contract.pdf",
+            mime_type="application/pdf",
+            size_bytes=2048,
+            uploaded_by=self.hr_admin,
+        )
+
+        self.url = "/api/v1/employees/hr-documents/"
+
+    def authenticate(self, user):
+        self.client.force_authenticate(user=user)
+
+    def test_unauthenticated_user_cannot_list_documents(self):
+        response = self.client.get(self.url)
+
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_401_UNAUTHORIZED,
+        )
+
+    def test_employee_can_list_only_own_documents(self):
+        self.authenticate(self.employee)
+
+        response = self.client.get(self.url)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["count"], 1)
+        self.assertEqual(
+            response.data["results"][0]["id"],
+            str(self.document.pk),
+        )
+
+    def test_employee_cannot_retrieve_another_employees_document(self):
+        self.authenticate(self.employee)
+
+        response = self.client.get(
+            f"{self.url}{self.other_document.pk}/"
+        )
+
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_404_NOT_FOUND,
+        )
+
+    def test_employee_can_retrieve_own_document(self):
+        self.authenticate(self.employee)
+
+        response = self.client.get(
+            f"{self.url}{self.document.pk}/"
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            response.data["id"],
+            str(self.document.pk),
+        )
+
+    def test_hr_admin_can_list_documents(self):
+        self.authenticate(self.hr_admin)
+
+        response = self.client.get(self.url)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["count"], 2)
+
+    def test_hr_manager_can_list_documents(self):
+        self.authenticate(self.hr_manager)
+
+        response = self.client.get(self.url)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["count"], 2)
+
+    def test_super_admin_can_list_documents(self):
+        self.authenticate(self.super_admin)
+
+        response = self.client.get(self.url)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["count"], 2)
+
+    def test_employee_cannot_delete_document(self):
+        self.authenticate(self.employee)
+
+        response = self.client.delete(
+            f"{self.url}{self.document.pk}/"
+        )
+
+        # La suppression n'est pas exposée par le ViewSet.
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_403_FORBIDDEN,
+        )
+
+    @patch("employees.serializers.scan_uploaded_file")
+    def test_employee_can_upload_document_to_own_profile(self,mock_scan,):
+        self.authenticate(self.employee)
+
+        uploaded_file = SimpleUploadedFile(
+            "my-contract.pdf",
+            b"%PDF-1.7 test contract",
+            content_type="application/pdf",
+        )
+
+        response = self.client.post(
+            self.url,
+            {
+                "title": "My Contract",
+                "document_type": (
+                    HRDocument.DocumentType.EMPLOYMENT_CONTRACT
+                ),
+                "document_file": uploaded_file,
+            },
+            format="multipart",
+        )
+
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_201_CREATED,
+            response.data,
+        )
+
+        document = HRDocument.objects.get(pk=response.data["id"])
+        self.assertEqual(document.employee, self.profile)
+        self.assertEqual(document.uploaded_by, self.employee)
+
+    @patch("employees.serializers.scan_uploaded_file")
+    def test_employee_cannot_upload_document_for_another_profile(self, mock_scan,):
+        self.authenticate(self.employee)
+
+        uploaded_file = SimpleUploadedFile(
+            "other-contract.pdf",
+            b"%PDF-1.7 test contract",
+            content_type="application/pdf",
+        )
+
+        response = self.client.post(
+            self.url,
+            {
+                "employee": self.other_profile.pk,
+                "title": "Other Contract",
+                "document_type": (
+                    HRDocument.DocumentType.EMPLOYMENT_CONTRACT
+                ),
+                "document_file": uploaded_file,
+            },
+            format="multipart",
+        )
+
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_201_CREATED,
+            response.data,
+        )
+
+        document = HRDocument.objects.get(pk=response.data["id"])
+        self.assertEqual(document.employee, self.profile)
+        self.assertNotEqual(document.employee, self.other_profile)
+
+    def test_hr_manager_can_verify_document_pending_review(self):
+        self.document.status = "PENDING_REVIEW"
+        self.document.save(update_fields=["status"])
+
+        self.authenticate(self.hr_manager)
+
+        response = self.client.post(
+            f"{self.url}{self.document.pk}/verify/"
+        )
+
+        self.assertEqual(response.status_code, 200)
+
+        self.document.refresh_from_db()
+        self.assertEqual(self.document.status, "VERIFIED")
+        self.assertEqual(
+            self.document.verified_by,
+            self.hr_manager,
+        )
+        self.assertIsNotNone(self.document.verified_at)
+        audit = AuditLog.objects.get(
+            action="HR_DOCUMENT_VERIFIED",
+        )
+        self.assertEqual(audit.user, self.hr_manager)
+
+        event = SecurityEvent.objects.get(
+            event_type="HR_DOCUMENT_VERIFIED",
+        )
+        self.assertEqual(event.user, self.hr_manager)
+        self.assertEqual(
+            event.request_path,
+            f"{self.url}{self.document.pk}/verify/",
+        )
+
+    def test_verify_rejects_document_not_pending_review(self):
+        self.authenticate(self.hr_manager)
+
+        response = self.client.post(
+            f"{self.url}{self.document.pk}/verify/"
+        )
+
+        self.assertEqual(response.status_code, 400)
+
+        self.document.refresh_from_db()
+        self.assertEqual(self.document.status, "PENDING_SCAN")
+        self.assertIsNone(self.document.verified_by)
+        self.assertIsNone(self.document.verified_at)
+
+    def test_employee_cannot_verify_document(self):
+        self.document.status = "PENDING_REVIEW"
+        self.document.save(update_fields=["status"])
+
+        self.authenticate(self.employee)
+
+        response = self.client.post(
+            f"{self.url}{self.document.pk}/verify/"
+        )
+
+        self.assertEqual(response.status_code, 403)
+
+        self.document.refresh_from_db()
+        self.assertEqual(self.document.status, "PENDING_REVIEW")
+
+    def test_hr_manager_can_reject_document_pending_review(self):
+        self.document.status = "PENDING_REVIEW"
+        self.document.save(update_fields=["status"])
+        self.authenticate(self.hr_manager)
+
+        response = self.client.post(
+            f"{self.url}{self.document.pk}/reject/",
+            {"reason": "The document is incomplete."},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+
+        self.document.refresh_from_db()
+        self.assertEqual(self.document.status, "REJECTED")
+        self.assertEqual(
+            self.document.rejection_reason,
+            "The document is incomplete.",
+        )
+
+        audit = AuditLog.objects.get(
+            action="HR_DOCUMENT_REJECTED",
+        )
+        self.assertEqual(audit.user, self.hr_manager)
+        self.assertNotIn(
+            "The document is incomplete.",
+            audit.details,
+        )
+
+        event = SecurityEvent.objects.get(
+            event_type="HR_DOCUMENT_REJECTED",
+        )
+        self.assertEqual(event.user, self.hr_manager)
+        self.assertEqual(
+            event.request_path,
+            f"{self.url}{self.document.pk}/reject/",
+        )
+        self.assertNotIn(
+            "The document is incomplete.",
+            event.details,
+        )
+
+    def test_reject_requires_reason(self):
+        self.document.status = "PENDING_REVIEW"
+        self.document.save(update_fields=["status"])
+        self.authenticate(self.hr_manager)
+
+        response = self.client.post(
+            f"{self.url}{self.document.pk}/reject/",
+            {},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.document.refresh_from_db()
+        self.assertEqual(self.document.status, "PENDING_REVIEW")
+        self.assertEqual(self.document.rejection_reason, "")
+
+    def test_reject_requires_non_blank_reason(self):
+        self.document.status = "PENDING_REVIEW"
+        self.document.save(update_fields=["status"])
+        self.authenticate(self.hr_manager)
+
+        response = self.client.post(
+            f"{self.url}{self.document.pk}/reject/",
+            {"reason": "   "},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.document.refresh_from_db()
+        self.assertEqual(self.document.status, "PENDING_REVIEW")
+        self.assertEqual(self.document.rejection_reason, "")
+
+    def test_reject_rejects_document_not_pending_review(self):
+        self.authenticate(self.hr_manager)
+
+        response = self.client.post(
+            f"{self.url}{self.document.pk}/reject/",
+            {"reason": "The document is incomplete."},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.document.refresh_from_db()
+        self.assertEqual(self.document.status, "PENDING_SCAN")
+        self.assertEqual(self.document.rejection_reason, "")
+
+    def test_employee_cannot_reject_document(self):
+        self.document.status = "PENDING_REVIEW"
+        self.document.save(update_fields=["status"])
+        self.authenticate(self.employee)
+
+        response = self.client.post(
+            f"{self.url}{self.document.pk}/reject/",
+            {"reason": "The document is incomplete."},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 403)
+        self.document.refresh_from_db()
+        self.assertEqual(self.document.status, "PENDING_REVIEW")
+        self.assertEqual(self.document.rejection_reason, "")
+
+    def test_hr_manager_can_archive_verified_document(self):
+        self.document.status = "VERIFIED"
+        self.document.save(update_fields=["status"])
+        self.authenticate(self.hr_manager)
+
+        response = self.client.post(
+            f"{self.url}{self.document.pk}/archive/"
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.document.refresh_from_db()
+        self.assertEqual(self.document.status, "ARCHIVED")
+
+        audit = AuditLog.objects.get(
+            action="HR_DOCUMENT_ARCHIVED",
+        )
+        self.assertEqual(audit.user, self.hr_manager)
+
+        event = SecurityEvent.objects.get(
+            event_type="HR_DOCUMENT_ARCHIVED",
+        )
+        self.assertEqual(event.user, self.hr_manager)
+        self.assertEqual(
+            event.request_path,
+            f"{self.url}{self.document.pk}/archive/",
+        )
+
+    def test_hr_manager_can_archive_rejected_document(self):
+        self.document.status = "REJECTED"
+        self.document.rejection_reason = "Incomplete document."
+        self.document.save(
+            update_fields=["status", "rejection_reason"]
+        )
+        self.authenticate(self.hr_manager)
+
+        response = self.client.post(
+            f"{self.url}{self.document.pk}/archive/"
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.document.refresh_from_db()
+        self.assertEqual(self.document.status, "ARCHIVED")
+        self.assertEqual(
+            self.document.rejection_reason,
+            "Incomplete document.",
+        )
+
+    def test_archive_rejects_document_with_invalid_status(self):
+        self.authenticate(self.hr_manager)
+
+        response = self.client.post(
+            f"{self.url}{self.document.pk}/archive/"
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.document.refresh_from_db()
+        self.assertEqual(self.document.status, "PENDING_SCAN")
+        self.assertFalse(
+            AuditLog.objects.filter(
+                action="HR_DOCUMENT_ARCHIVED",
+            ).exists()
+        )
+        self.assertFalse(
+            SecurityEvent.objects.filter(
+                event_type="HR_DOCUMENT_ARCHIVED",
+            ).exists()
+        )
+
+    def test_employee_cannot_archive_document(self):
+        self.document.status = "VERIFIED"
+        self.document.save(update_fields=["status"])
+        self.authenticate(self.employee)
+
+        response = self.client.post(
+            f"{self.url}{self.document.pk}/archive/"
+        )
+
+        self.assertEqual(response.status_code, 403)
+        self.document.refresh_from_db()
+        self.assertEqual(self.document.status, "VERIFIED")
