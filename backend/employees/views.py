@@ -1,14 +1,38 @@
-from django.core.exceptions import ValidationError
+import hashlib
+import uuid
+from django.http import FileResponse, Http404
+from django.db.models import Q
+from django.core.exceptions import ValidationError as DjangoValidationError
 from django.utils import timezone
 from django_filters.rest_framework import DjangoFilterBackend
+from django.core.exceptions import PermissionDenied as DjangoPermissionDenied
+from rest_framework.exceptions import PermissionDenied as DRFPermissionDenied
 from rest_framework.filters import OrderingFilter
-from rest_framework import status, viewsets
+from rest_framework import status, viewsets, mixins
 from rest_framework.decorators import action
 from rest_framework.response import Response
+from rest_framework.exceptions import ValidationError as DRFValidationError
+from rest_framework.parsers import FormParser, MultiPartParser
+from rest_framework.filters import SearchFilter
+from rest_framework.views import APIView
 
 from accounts.models import AuditLog
 from accounts.siem import create_security_event
 
+from employees.permissions import (
+    HRDocumentDownloadPermission,
+    HRDocumentPermission,
+    OnboardingJourneyPermission,
+    OnboardingTaskPermission,
+    DashboardPermission,
+)
+from employees.storage import hr_document_storage
+from employees.services.task_assignment import TaskAssignmentService
+from employees.services.workflow_engine import WorkflowEngine
+from employees.services.document_version import DocumentVersionService
+from employees.services.document_review import DocumentReviewService
+from employees.services.document_audit import DocumentAuditService
+from employees.filters import DocumentAccessLogFilter
 from .models import (
     Department,
     EmployeeProfile,
@@ -22,20 +46,36 @@ from .models import (
     BankAccount,
     PerformanceReview,
     Position,
+    HRDocument,
+    DocumentReview,
+    OnboardingJourney,
+    OnboardingTask,
+    DocumentAccessLog,
 )
 from .permissions import (
     EmployeeProfilePermission,
     LeaveRequestPermission,
     BankAccountPermission,
     PerformanceReviewPermission,
+    DocumentAccessLogPermission,
 )
 from .serializers import (
     EmployeeProfileSerializer,
     LeaveRequestSerializer,
     BankAccountSerializer,
     PerformanceReviewSerializer,
+    HRDocumentSerializer,
+    DocumentVersionSerializer,
+    DocumentReviewSerializer,
+    DocumentAccessLogSerializer,
+    OnboardingJourneySerializer,
+    OnboardingTaskSerializer,
+    OnboardingTaskAssignmentSerializer,
+    OnboardingTaskTransitionSerializer,
+    DashboardFilterSerializer,
 )
-
+from employees.services.document_access import DocumentAccessService
+from employees.services.dashboard.dashboard_service import DashboardService
 
 class EmployeeProfileViewSet(viewsets.ModelViewSet):
     """API endpoint for managing employee profiles."""
@@ -147,7 +187,6 @@ class EmployeeProfileViewSet(viewsets.ModelViewSet):
             )
 
         return EmployeeProfile.objects.all()
-
 
 class LeaveRequestViewSet(viewsets.ModelViewSet):
     """API endpoint for managing employee leave requests."""
@@ -662,7 +701,19 @@ class PerformanceReviewViewSet(viewsets.ModelViewSet):
         )
 
     def perform_update(self, serializer):
-        """Update a performance review."""
+        """Update a performance review according to its status."""
+
+        review = self.get_object()
+        user = self.request.user
+
+        if (
+            review.status in ("SUBMITTED", "ACKNOWLEDGED")
+            and user.role not in ("SUPER_ADMIN", "HR_ADMIN", "HR_MANAGER")
+        ):
+            raise DRFValidationError(
+                "Only authorized HR users can correct "
+                "a submitted or acknowledged review."
+            )
 
         review = serializer.save()
 
@@ -673,7 +724,7 @@ class PerformanceReviewViewSet(viewsets.ModelViewSet):
                 "Performance review updated for employee "
                 f"{review.employee.employee_id}."
             ),
-            user=self.request.user,
+            user=user,
         )
 
     def destroy(self, request, *args, **kwargs):
@@ -762,5 +813,652 @@ class PerformanceReviewViewSet(viewsets.ModelViewSet):
 
         return Response(
             self.get_serializer(review).data,
+            status=status.HTTP_200_OK,
+        )
+
+class HRDocumentViewSet(
+    mixins.ListModelMixin,
+    mixins.RetrieveModelMixin,
+    mixins.CreateModelMixin,
+    mixins.UpdateModelMixin,
+    viewsets.GenericViewSet,
+):
+    """Expose authorized HR document metadata operations."""
+
+    serializer_class = HRDocumentSerializer
+    permission_classes = (HRDocumentPermission,)
+
+    filter_backends = (
+        DjangoFilterBackend,
+        OrderingFilter,
+    )
+
+    filterset_fields = (
+        "document_type",
+        "status",
+        "employee",
+    )
+
+    ordering_fields = (
+        "uploaded_at",
+        "updated_at",
+        "expires_at",
+        "document_type",
+        "status",
+    )
+
+    def get_queryset(self):
+        """Return only documents accessible to the current user."""
+
+        user = self.request.user
+
+        queryset = DocumentAccessService.get_accessible_documents(
+            user
+        )
+
+        return queryset.select_related(
+            "employee",
+            "employee__user",
+            "uploaded_by",
+            "verified_by",
+        )
+    def retrieve(self, request, *args, **kwargs):
+        """Retrieve document metadata and record the access."""
+        document = self.get_object()
+
+        DocumentAuditService.record(
+            request=request,
+            action=DocumentAccessLog.Action.VIEW,
+            document=document,
+            details="HR document metadata viewed.",
+        )
+
+        serializer = self.get_serializer(document)
+        return Response(serializer.data)
+    @action(
+        detail=True,
+        methods=["get"],
+        permission_classes=[HRDocumentDownloadPermission],
+    )
+    def download(self, request, pk=None):
+        """Download a verified HR document as an attachment."""
+        document = self.get_object()
+
+        # Defense in depth: never open an unverified file.
+        if document.status != HRDocument.Status.VERIFIED:
+            from rest_framework.exceptions import PermissionDenied
+
+            raise PermissionDenied(
+                "This document is not available for download."
+            )
+
+        try:
+            file_handle = hr_document_storage.open(
+                document.storage_key,
+                "rb",
+            )
+        except Exception as exc:
+            raise Http404(
+                "The requested document is unavailable."
+            ) from exc
+
+        filename = (
+            document.original_filename
+            .split("/")[-1]
+            .split("\\")[-1]
+        )
+        DocumentAuditService.record(
+            request=request,
+            action=DocumentAccessLog.Action.DOWNLOAD,
+            document=document,
+            details="Verified HR document downloaded.",
+        )
+        return FileResponse(
+            file_handle,
+            as_attachment=True,
+            filename=filename,
+            content_type="application/octet-stream",
+        )
+
+    @action(detail=True, methods=["get"], url_path="versions")
+    def versions(self, request, pk=None):
+        """List version metadata for an accessible HR document."""
+        document = self.get_object()
+
+        versions = document.versions.order_by("-version_number")
+
+        serializer = DocumentVersionSerializer(
+            versions,
+            many=True,
+            context=self.get_serializer_context(),
+        )
+
+        return Response(serializer.data, status=status.HTTP_200_OK)
+    @action(detail=True, methods=["get"], url_path="reviews")
+    def reviews(self, request, pk=None):
+        """List review history for an accessible HR document."""
+        document = self.get_object()
+
+        reviews = document.reviews.select_related(
+            "reviewer",
+            "version",
+        ).order_by("-reviewed_at")
+
+        serializer = DocumentReviewSerializer(
+            reviews,
+            many=True,
+            context=self.get_serializer_context(),
+        )
+
+        return Response(
+            serializer.data,
+            status=status.HTTP_200_OK,
+        )
+    @action(
+        detail=True,
+        methods=["post"],
+        url_path="create-version",
+        parser_classes = [MultiPartParser, FormParser],
+    )
+    def create_version(self, request, pk=None):
+        """Create a new private version of an accessible HR document."""
+        document = self.get_object()
+
+        uploaded_file = request.FILES.get("file")
+        if uploaded_file is None:
+            raise DRFValidationError({
+                "file": "This field is required."
+            })
+
+        try:
+            version = DocumentVersionService.create_version(
+                document_id=document.pk,
+                uploaded_file=uploaded_file,
+                actor=request.user,
+            )
+        except DjangoValidationError as exc:
+            raise DRFValidationError({
+                "file": exc.messages,
+            }) from exc
+
+        serializer = DocumentVersionSerializer(
+            version,
+            context=self.get_serializer_context(),
+        )
+        DocumentAuditService.record(
+            request=request,
+            action=DocumentAccessLog.Action.CREATE_VERSION,
+            document=document,
+            details="New HR document version created.",
+        )
+        return Response(
+            serializer.data,
+            status=status.HTTP_201_CREATED,
+        )
+
+    def perform_create(self, serializer):
+        """Create a document for an authorized employee."""
+        user = self.request.user
+
+        if user.role == "EMPLOYEE":
+            try:
+                employee = EmployeeProfile.objects.get(user=user)
+            except EmployeeProfile.DoesNotExist:
+                raise DRFValidationError(
+                    "No employee profile is associated with this account."
+                )
+        else:
+            employee_id = self.request.data.get("employee")
+
+            if not employee_id:
+                raise DRFValidationError(
+                    {"employee": "This field is required."}
+                )
+
+            try:
+                employee = EmployeeProfile.objects.get(pk=employee_id)
+            except (
+                EmployeeProfile.DoesNotExist,
+                ValidationError,
+                ValueError,
+                TypeError,
+            ):
+                raise DRFValidationError(
+                    {"employee": "Invalid employee profile."}
+                )
+
+        document = serializer.save(
+            employee=employee,
+            uploaded_by=user,
+        )
+
+        create_security_event(
+            self.request,
+            "ACCOUNT_CHANGE",
+            details=(
+                f"HR document uploaded: {document.pk}."
+            ),
+            user=user,
+        )
+        DocumentAuditService.record(
+            request=self.request,
+            action=DocumentAccessLog.Action.CREATE,
+            document=document,
+            details="HR document uploaded.",
+        )
+    def perform_update(self, serializer):
+        """Save metadata changes and record a security event."""
+
+        document = serializer.save()
+
+        create_security_event(
+            self.request,
+            "ACCOUNT_CHANGE",
+            details=(
+                "HR document metadata updated for document "
+                f"{document.pk}."
+            ),
+            user=self.request.user,
+        )
+        DocumentAuditService.record(
+            request=self.request,
+            action=DocumentAccessLog.Action.UPDATE,
+            document=document,
+            details="HR document metadata updated.",
+        )
+    @action(detail=True, methods=["post"])
+    def verify(self, request, pk=None):
+        """Verify a document pending HR review and record the decision."""
+
+        document = self.get_object()
+
+        try:
+            DocumentReviewService.review_document(
+                document_id=document.pk,
+                actor=request.user,
+                decision=DocumentReview.Decision.APPROVED,
+            )
+        except DjangoPermissionDenied as exc:
+            raise DRFPermissionDenied(str(exc)) from exc
+        except DjangoValidationError as exc:
+            detail = (
+                exc.messages
+                if hasattr(exc, "messages")
+                else str(exc)
+            )
+            raise DRFValidationError({"detail": detail}) from exc
+
+        document.refresh_from_db()
+
+        details = (
+            f"HR document {document.pk} verified "
+            f"for employee {document.employee.employee_id}."
+        )
+
+        AuditLog.objects.create(
+            user=request.user,
+            action="HR_DOCUMENT_VERIFIED",
+            details=details,
+        )
+
+        create_security_event(
+            request=request,
+            user=request.user,
+            event_type="HR_DOCUMENT_VERIFIED",
+            details=details,
+        )
+        DocumentAuditService.record(
+            request=request,
+            action=DocumentAccessLog.Action.VERIFY,
+            document=document,
+            details="HR document verified.",
+        )
+        return Response(
+            self.get_serializer(document).data,
+            status=status.HTTP_200_OK,
+        )
+
+    @action(detail=True, methods=["post"])
+    def reject(self, request, pk=None):
+        """Reject a document and record the review decision."""
+
+        document = self.get_object()
+        reason = request.data.get("reason")
+
+        if not isinstance(reason, str) or not reason.strip():
+            return Response(
+                {"reason": "A non-empty rejection reason is required."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        reason = reason.strip()
+
+        try:
+            DocumentReviewService.review_document(
+                document_id=document.pk,
+                actor=request.user,
+                decision=DocumentReview.Decision.REJECTED,
+                comment=reason,
+            )
+        except DjangoPermissionDenied as exc:
+            raise DRFPermissionDenied(str(exc)) from exc
+        except DjangoValidationError as exc:
+            detail = (
+                exc.messages
+                if hasattr(exc, "messages")
+                else str(exc)
+            )
+            raise DRFValidationError({"detail": detail}) from exc
+
+        document.refresh_from_db()
+
+        details = (
+            f"HR document {document.pk} rejected "
+            f"for employee {document.employee.employee_id}."
+        )
+
+        AuditLog.objects.create(
+            user=request.user,
+            action="HR_DOCUMENT_REJECTED",
+            details=details,
+        )
+
+        create_security_event(
+            request=request,
+            user=request.user,
+            event_type="HR_DOCUMENT_REJECTED",
+            details=details,
+        )
+        DocumentAuditService.record(
+            request=request,
+            action=DocumentAccessLog.Action.REJECT,
+            document=document,
+            details="HR document rejected.",
+        )
+        return Response(
+            self.get_serializer(document).data,
+            status=status.HTTP_200_OK,
+        )
+
+    @action(detail=True, methods=["post"])
+    def archive(self, request, pk=None):
+        """Archive a verified or rejected HR document."""
+        document = self.get_object()
+
+        if document.status not in ("VERIFIED", "REJECTED"):
+            return Response(
+                {
+                    "detail": (
+                        "Only verified or rejected documents "
+                        "can be archived."
+                    )
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        document.status = "ARCHIVED"
+        document.save(update_fields=["status", "updated_at"])
+
+        details = (
+            f"HR document {document.pk} archived "
+            f"for employee {document.employee.employee_id}."
+        )
+
+        AuditLog.objects.create(
+            user=request.user,
+            action="HR_DOCUMENT_ARCHIVED",
+            details=details,
+        )
+
+        create_security_event(
+            request=request,
+            user=request.user,
+            event_type="HR_DOCUMENT_ARCHIVED",
+            details=details,
+        )
+        DocumentAuditService.record(
+            request=request,
+            action=DocumentAccessLog.Action.ARCHIVE,
+            document=document,
+            details="HR document archived.",
+        )
+        return Response(
+            self.get_serializer(document).data,
+            status=status.HTTP_200_OK,
+        )
+
+class OnboardingJourneyViewSet(viewsets.ReadOnlyModelViewSet):
+    """Expose onboarding journeys with role-based queryset filtering."""
+
+    serializer_class = OnboardingJourneySerializer
+    permission_classes = (OnboardingJourneyPermission,)
+
+    def get_queryset(self):
+        user = self.request.user
+
+        queryset = OnboardingJourney.objects.select_related(
+            "employee__user",
+        )
+
+        if user.role in {
+            "SUPER_ADMIN",
+            "HR_ADMIN",
+            "HR_MANAGER",
+        }:
+            return queryset
+
+        if user.role == "EMPLOYEE":
+            return queryset.filter(employee__user_id=user.pk)
+
+        return queryset.none()
+
+class OnboardingTaskViewSet(viewsets.GenericViewSet):
+    """Expose onboarding tasks and controlled workflow operations."""
+
+    serializer_class = OnboardingTaskSerializer
+    permission_classes = (OnboardingTaskPermission,)
+
+    def get_queryset(self):
+        user = self.request.user
+
+        queryset = OnboardingTask.objects.select_related(
+            "journey__employee__user",
+            "assigned_to",
+        )
+
+        if user.role in {
+            "SUPER_ADMIN",
+            "HR_ADMIN",
+            "HR_MANAGER",
+        }:
+            return queryset
+
+        if user.role == "EMPLOYEE":
+            return queryset.filter(
+                Q(journey__employee__user_id=user.pk)
+                | Q(assigned_to_id=user.pk)
+            ).distinct()
+
+        return queryset.none()
+
+    def get_serializer_class(self):
+        if getattr(self, "action", None) == "assign":
+            return OnboardingTaskAssignmentSerializer
+
+        if getattr(self, "action", None) == "transition":
+            return OnboardingTaskTransitionSerializer
+
+        return OnboardingTaskSerializer
+
+    def list(self, request, *args, **kwargs):
+        queryset = self.filter_queryset(self.get_queryset())
+        page = self.paginate_queryset(queryset)
+
+        if page is not None:
+            serializer = OnboardingTaskSerializer(
+                page,
+                many=True,
+                context=self.get_serializer_context(),
+            )
+            return self.get_paginated_response(serializer.data)
+
+        serializer = OnboardingTaskSerializer(
+            queryset,
+            many=True,
+            context=self.get_serializer_context(),
+        )
+        return Response(serializer.data)
+
+    def retrieve(self, request, *args, **kwargs):
+        task = self.get_object()
+        serializer = OnboardingTaskSerializer(
+            task,
+            context=self.get_serializer_context(),
+        )
+        return Response(serializer.data)
+
+    @action(detail=True, methods=["post"])
+    def assign(self, request, pk=None):
+        task = self.get_object()
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        try:
+            task = TaskAssignmentService.assign_task(
+                task_id=task.pk,
+                assigned_to_id=serializer.validated_data["assigned_to_id"],
+                actor=request.user,
+            )
+        except DjangoValidationError as exc:
+            detail = (
+                exc.message_dict
+                if hasattr(exc, "message_dict")
+                else exc.messages
+            )
+            raise ValidationError(detail) from exc
+
+        return Response(
+            OnboardingTaskSerializer(
+                task,
+                context=self.get_serializer_context(),
+            ).data,
+            status=status.HTTP_200_OK,
+        )
+
+    @action(detail=True, methods=["post"])
+    def transition(self, request, pk=None):
+        task = self.get_object()
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        try:
+            task = WorkflowEngine.transition_task(
+                task_id=task.pk,
+                target_status=serializer.validated_data["target_status"],
+                actor=request.user,
+            )
+        except DjangoValidationError as exc:
+            detail = (
+                exc.message_dict
+                if hasattr(exc, "message_dict")
+                else exc.messages
+            )
+            raise ValidationError(detail) from exc
+
+        return Response(
+            OnboardingTaskSerializer(
+                task,
+                context=self.get_serializer_context(),
+            ).data,
+            status=status.HTTP_200_OK,
+        )
+
+class DocumentAccessLogViewSet(viewsets.ReadOnlyModelViewSet):
+    """Read-only API for authorized HR staff to inspect document audit logs."""
+
+    queryset = DocumentAccessLog.objects.select_related(
+        "user",
+        "document",
+    ).all()
+
+    serializer_class = DocumentAccessLogSerializer
+    permission_classes = (DocumentAccessLogPermission,)
+
+    filter_backends = (
+        DjangoFilterBackend,
+        SearchFilter,
+        OrderingFilter,
+    )
+    filterset_class = DocumentAccessLogFilter
+
+    search_fields = (
+        "request_path",
+        "details",
+        "user__email",
+        "user__name",
+    )
+
+    ordering_fields = (
+        "created_at",
+        "action",
+        "user__email",
+    )
+    ordering = ("-created_at",)
+
+class DashboardView(APIView):
+    """
+    Read-only API endpoint for aggregated HR dashboard metrics.
+
+    HR managers are restricted to their own department.
+    Super admins and HR admins retain global access.
+    """
+
+    permission_classes = (DashboardPermission,)
+
+    def get(self, request):
+        """
+        Validate filters, enforce department scope,
+        and return aggregated dashboard metrics.
+        """
+
+        serializer = DashboardFilterSerializer(
+            data=request.query_params
+        )
+        serializer.is_valid(raise_exception=True)
+
+        dashboard_filters = dict(serializer.validated_data)
+
+        if request.user.role == "HR_MANAGER":
+            try:
+                manager_department_id = (
+                    request.user.employee_profile.department_id
+                )
+            except EmployeeProfile.DoesNotExist:
+                raise DRFPermissionDenied(
+                    "HR managers must have an employee profile "
+                    "with an assigned department."
+                )
+
+            requested_department_id = dashboard_filters.get(
+                "department_id"
+            )
+
+            if (
+                requested_department_id is not None
+                and requested_department_id != manager_department_id
+            ):
+                raise DRFPermissionDenied(
+                    "You can only access dashboard data "
+                    "for your own department."
+                )
+
+            dashboard_filters["department_id"] = manager_department_id
+
+        dashboard_data = DashboardService.get_dashboard(
+            **dashboard_filters
+        )
+
+        return Response(
+            dashboard_data,
             status=status.HTTP_200_OK,
         )

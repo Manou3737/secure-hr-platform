@@ -1,7 +1,6 @@
 from rest_framework import serializers
 
 import uuid
-from employees.storage import hr_document_storage
 from django.db import transaction
 
 from employees.antivirus import (
@@ -9,7 +8,11 @@ from employees.antivirus import (
     MalwareDetected,
     scan_uploaded_file,
 )
-
+from employees.storage import (
+    hr_document_storage,
+    quarantine_hr_document,
+)
+from employees.models import OnboardingJourney, OnboardingTask
 from .models import (
     LeaveRequest,
     Department,
@@ -24,9 +27,19 @@ from .models import (
     PerformanceReview,
     Position,
     HRDocument,
+    DocumentVersion,
+    DocumentReview,
+    DocumentAccessLog,
+)
+from employees.validators.dashboard import (
+    validate_dashboard_as_of,
+    validate_dashboard_days,
+    validate_dashboard_recent_limit,
 )
 import hashlib
+import logging
 
+logger = logging.getLogger(__name__)
 class EmployeeProfileSerializer(serializers.ModelSerializer):
     """Serialize employee HR profile data."""
 
@@ -282,69 +295,33 @@ class HRDocumentSerializer(serializers.ModelSerializer):
 
         return uploaded_file
 
+    def get_fields(self):
+        """Restrict sensitive metadata updates by employees."""
+        fields = super().get_fields()
+
+        request = self.context.get("request")
+        user = getattr(request, "user", None)
+
+        if (
+            self.instance is not None
+            and getattr(user, "role", None) == "EMPLOYEE"
+        ):
+            fields["metadata"].read_only = True
+            fields["expires_at"].read_only = True
+
+        return fields
     def create(self, validated_data):
-        """Store the document and apply the antivirus scan lifecycle."""
+        """Delegate secure file storage and scanning to the service."""
+        from employees.services.document_upload import (
+            DocumentUploadService,
+        )
+
         uploaded_file = validated_data.pop("document_file")
 
-        original_filename = uploaded_file.name
-        mime_type = uploaded_file.content_type or (
-            "application/octet-stream"
+        return DocumentUploadService.create_document(
+            uploaded_file=uploaded_file,
+            document_data=validated_data,
         )
-        size_bytes = uploaded_file.size
-
-        sha256 = hashlib.sha256()
-        uploaded_file.seek(0)
-        for chunk in uploaded_file.chunks():
-            sha256.update(chunk)
-        checksum_sha256 = sha256.hexdigest()
-
-        extension = (
-            original_filename.rsplit(".", 1)[-1].lower()
-            if "." in original_filename
-            else ""
-        )
-        storage_key = (
-            f"hr-documents/{uuid.uuid4().hex}.{extension}"
-            if extension
-            else f"hr-documents/{uuid.uuid4().hex}"
-        )
-
-        uploaded_file.seek(0)
-        saved_key = hr_document_storage.save(
-            storage_key,
-            uploaded_file,
-        )
-
-        try:
-            with transaction.atomic():
-                document = HRDocument.objects.create(
-                    **validated_data,
-                    storage_key=saved_key,
-                    original_filename=original_filename,
-                    mime_type=mime_type,
-                    size_bytes=size_bytes,
-                    checksum_sha256=checksum_sha256,
-                    status=HRDocument.Status.PENDING_SCAN,
-                )
-        except Exception:
-            hr_document_storage.delete(saved_key)
-            raise
-
-        try:
-            uploaded_file.seek(0)
-            scan_uploaded_file(uploaded_file)
-        except MalwareDetected:
-            document.status = HRDocument.Status.QUARANTINED
-            document.save(update_fields=["status", "updated_at"])
-        except AntivirusUnavailable:
-            # Keep the document pending for a future scan retry.
-            pass
-        else:
-            document.status = HRDocument.Status.PENDING_REVIEW
-            document.save(update_fields=["status", "updated_at"])
-
-        return document
-
     class Meta:
         model = HRDocument
         fields = (
@@ -382,3 +359,151 @@ class HRDocumentSerializer(serializers.ModelSerializer):
             "verified_at",
             "rejection_reason",
         )
+
+class OnboardingJourneySerializer(serializers.ModelSerializer):
+    """Serialize onboarding journeys for authorized API clients."""
+
+    class Meta:
+        model = OnboardingJourney
+        fields = "__all__"
+        read_only_fields = (
+            "id",
+            "employee",
+            "template",
+            "status",
+            "started_at",
+            "completed_at",
+            "created_by",
+            "created_at",
+            "updated_at",
+        )
+
+class OnboardingTaskSerializer(serializers.ModelSerializer):
+    """Serialize onboarding tasks without allowing direct status changes."""
+
+    class Meta:
+        model = OnboardingTask
+        fields = "__all__"
+        read_only_fields = (
+            "id",
+            "employee",
+            "template",
+            "status",
+            "started_at",
+            "completed_at",
+            "created_by",
+            "created_at",
+            "updated_at",
+        )
+
+class OnboardingTaskAssignmentSerializer(serializers.Serializer):
+    """Validate the assignee identifier for a task assignment."""
+
+    assigned_to_id = serializers.IntegerField(min_value=1)
+
+class OnboardingTaskTransitionSerializer(serializers.Serializer):
+    """Validate a requested onboarding task status transition."""
+
+    target_status = serializers.ChoiceField(
+        choices=OnboardingTask.Status.choices,
+    )
+
+class DocumentVersionSerializer(serializers.ModelSerializer):
+    """Expose safe metadata for an immutable HR document version."""
+
+    class Meta:
+        model = DocumentVersion
+        fields = (
+            "id",
+            "document",
+            "version_number",
+            "original_filename",
+            "mime_type",
+            "size_bytes",
+            "checksum_sha256",
+            "created_by",
+            "created_at",
+        )
+        read_only_fields = fields
+
+class DocumentReviewSerializer(serializers.ModelSerializer):
+    """Expose immutable HR document review history."""
+
+    class Meta:
+        model = DocumentReview
+        fields = (
+            "id",
+            "document",
+            "version",
+            "reviewer",
+            "decision",
+            "comment",
+            "reviewed_at",
+        )
+        read_only_fields = fields
+
+class DocumentAccessLogSerializer(serializers.ModelSerializer):
+    """Expose audit logs as read-only records."""
+
+    user_email = serializers.CharField(
+        source="user.email",
+        read_only=True,
+        default=None,
+    )
+    document_title = serializers.CharField(
+        source="document.title",
+        read_only=True,
+        default=None,
+    )
+
+    class Meta:
+        model = DocumentAccessLog
+        fields = (
+            "id",
+            "document",
+            "document_title",
+            "user",
+            "user_email",
+            "action",
+            "ip_address",
+            "user_agent",
+            "request_path",
+            "details",
+            "created_at",
+        )
+        read_only_fields = fields
+
+class DashboardFilterSerializer(serializers.Serializer):
+    """Validate filters accepted by the HR dashboard API."""
+
+    department_id = serializers.IntegerField(
+        required=False,
+        min_value=1,
+    )
+
+    as_of = serializers.DateField(
+        required=False,
+        allow_null=False,
+        validators=[validate_dashboard_as_of],
+    )
+
+    days = serializers.IntegerField(
+        required=False,
+        default=7,
+        validators=[validate_dashboard_days],
+    )
+
+    recent_limit = serializers.IntegerField(
+        required=False,
+        default=10,
+        validators=[validate_dashboard_recent_limit],
+    )
+
+    def validate_department_id(self, value):
+        """Ensure the requested department exists."""
+        if not Department.objects.filter(pk=value).exists():
+            raise serializers.ValidationError(
+                "The specified department does not exist."
+            )
+
+        return value

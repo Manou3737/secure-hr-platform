@@ -7,7 +7,7 @@ from django.utils.http import (
     urlsafe_base64_encode,
 )
 
-from rest_framework import status
+from rest_framework import serializers as drf_serializers, status, viewsets
 from rest_framework import viewsets
 from rest_framework.exceptions import ValidationError
 from rest_framework.permissions import AllowAny, IsAuthenticated
@@ -32,7 +32,12 @@ from .siem import (
     create_security_event,
     get_client_ip,
 )
-
+from drf_spectacular.utils import (
+    OpenApiParameter,
+    OpenApiResponse,
+    extend_schema,
+    inline_serializer,
+)
 
 class LoginRateThrottle(AnonRateThrottle):
     """Limit anonymous login attempts."""
@@ -72,6 +77,38 @@ class EmailVerificationViewSet(viewsets.ViewSet):
     """Handles email verification."""
 
     permission_classes = (AllowAny,)
+
+    @extend_schema(
+        summary="Verify an email address",
+        description=(
+            "Verifies a user's email address using the UID "
+            "and token provided in the verification link."
+        ),
+        parameters=[
+            OpenApiParameter(
+                name="uid",
+                type=str,
+                location=OpenApiParameter.QUERY,
+                required=True,
+                description="Base64-encoded user identifier.",
+            ),
+            OpenApiParameter(
+                name="token",
+                type=str,
+                location=OpenApiParameter.QUERY,
+                required=True,
+                description="Email verification token.",
+            ),
+        ],
+        responses={
+            200: OpenApiResponse(
+                description="Email address verified successfully."
+            ),
+            400: OpenApiResponse(
+                description="Missing, invalid, or expired verification credentials."
+            ),
+        },
+    )
 
     def list(self, request):
         uid = request.query_params.get("uid")
@@ -162,12 +199,32 @@ class LoginViewSet(viewsets.ViewSet):
     )
     permission_classes = (AllowAny,)
 
+    @extend_schema(
+        summary="Authenticate a user",
+        description=(
+            "Authenticates a user and returns access "
+            "and refresh JWT tokens."
+        ),
+        request=serializers.AuthTokenSerializer,
+        responses={
+            200: inline_serializer(
+                name="LoginResponse",
+                fields={
+                    "refresh": drf_serializers.CharField(),
+                    "access": drf_serializers.CharField(),
+                },
+            ),
+            400: OpenApiResponse(
+                description="Invalid login credentials or request."
+            ),
+        },
+    )
     def create(self, request):
         ip_address = get_client_ip(request)
 
         detect_suspicious_ip(
              request,
-            ip_address
+             ip_address
         )
 
         serializer = self.serializer_class(
@@ -240,6 +297,33 @@ class LogoutViewSet(viewsets.ViewSet):
 
     permission_classes = (AllowAny,)
 
+    @extend_schema(
+        summary="Log out a user",
+        description=(
+            "Invalidates a refresh token by adding it "
+            "to the token blacklist."
+        ),
+        request=inline_serializer(
+            name="LogoutRequest",
+            fields={
+                "refresh": drf_serializers.CharField(
+                    help_text="Refresh token to invalidate."
+                ),
+            },
+        ),
+        responses={
+            205: OpenApiResponse(
+                description="Successfully logged out."
+            ),
+            400: OpenApiResponse(
+                description=(
+                    "Refresh token is missing, invalid, "
+                    "or expired."
+                )
+            ),
+        },
+    )
+
     def create(self, request):
         refresh_token = request.data.get(
             "refresh"
@@ -287,6 +371,27 @@ class PasswordChangeViewSet(viewsets.ViewSet):
 
     permission_classes = (IsAuthenticated,)
 
+    @extend_schema(
+        summary="Change the current user's password",
+        description=(
+            "Changes the authenticated user's password "
+            "after validating the supplied credentials. "
+            "Records a security event and an audit entry."
+        ),
+        request=serializers.PasswordChangeSerializer,
+        responses={
+            200: OpenApiResponse(
+                description="Password changed successfully."
+            ),
+            400: OpenApiResponse(
+                description="The submitted password data is invalid."
+            ),
+            401: OpenApiResponse(
+                description="Authentication is required."
+            ),
+        },
+    )
+
     def create(self, request):
         serializer = serializers.PasswordChangeSerializer(
             data=request.data,
@@ -327,6 +432,26 @@ class PasswordResetRequestViewSet(viewsets.ViewSet):
     """Send a password reset link to a user."""
 
     permission_classes = (AllowAny,)
+    @extend_schema(
+        summary="Request a password reset",
+        description=(
+            "Sends a password reset link when an account "
+            "exists for the submitted email. The response "
+            "does not reveal whether the account exists."
+        ),
+        request=serializers.PasswordResetRequestSerializer,
+        responses={
+            200: OpenApiResponse(
+                description=(
+                    "A generic response confirming that "
+                    "the request was processed."
+                )
+            ),
+            400: OpenApiResponse(
+                description="The submitted email data is invalid."
+            ),
+        },
+    )
 
     def create(self, request):
         serializer = serializers.PasswordResetRequestSerializer(
@@ -384,6 +509,27 @@ class PasswordResetConfirmViewSet(viewsets.ViewSet):
 
     permission_classes = (AllowAny,)
 
+    @extend_schema(
+        summary="Confirm a password reset",
+        description=(
+            "Resets a user's password after validating "
+            "the password reset credentials."
+        ),
+        request=serializers.PasswordResetConfirmSerializer,
+        responses={
+            200: OpenApiResponse(
+                description="Password reset successfully."
+            ),
+            400: OpenApiResponse(
+                description=(
+                    "The reset credentials or password data "
+                    "are invalid or expired."
+                )
+            ),
+        },
+    )
+
+
     def create(self, request):
         serializer = serializers.PasswordResetConfirmSerializer(
             data=request.data
@@ -422,6 +568,42 @@ class AccountStatusViewSet(viewsets.ViewSet):
 
     permission_classes = (
         permissions.IsStaffOrOwnDeactivation,
+    )
+
+    @extend_schema(
+        summary="Activate or deactivate a user account",
+        description=(
+            "Updates the active status of a user account "
+            "after checking object-level permissions. "
+            "Records an audit entry and a security event."
+        ),
+        parameters=[
+            OpenApiParameter(
+                name="id",
+                type=int,
+                location=OpenApiParameter.PATH,
+                required=True,
+                description="ID of the user account.",
+            ),
+        ],
+        request=serializers.AccountStatusSerializer,
+        responses={
+            200: OpenApiResponse(
+                description="Account status updated successfully."
+            ),
+            400: OpenApiResponse(
+                description="The submitted account status is invalid."
+            ),
+            401: OpenApiResponse(
+                description="Authentication is required."
+            ),
+            403: OpenApiResponse(
+                description="You do not have permission to change this account."
+            ),
+            404: OpenApiResponse(
+                description="User account not found."
+            ),
+        },
     )
 
     def partial_update(self, request, pk=None):
@@ -491,6 +673,41 @@ class PrivilegeManagementViewSet(viewsets.ViewSet):
 
     permission_classes = (
         permissions.IsAdmin,
+    )
+
+    @extend_schema(
+        summary="Update user privileges",
+        description=(
+            "Updates the administrative privileges of a user. "
+            "Restricted to administrators."
+        ),
+        parameters=[
+            OpenApiParameter(
+                name="id",
+                type=int,
+                location=OpenApiParameter.PATH,
+                required=True,
+                description="ID of the user account.",
+            ),
+        ],
+        request=serializers.UserPrivilegeSerializer,
+        responses={
+            200: OpenApiResponse(
+                description="User privileges updated successfully."
+            ),
+            400: OpenApiResponse(
+                description="The submitted privilege data is invalid."
+            ),
+            401: OpenApiResponse(
+                description="Authentication is required."
+            ),
+            403: OpenApiResponse(
+                description="Administrator permissions are required."
+            ),
+            404: OpenApiResponse(
+                description="User account not found."
+            ),
+        },
     )
 
     def partial_update(self, request, pk=None):
@@ -575,6 +792,20 @@ class MeView(APIView):
     """Return the authenticated user's account information."""
 
     permission_classes = (IsAuthenticated,)
+
+    @extend_schema(
+        summary="Retrieve the current user's account",
+        description=(
+            "Returns the account information of the "
+            "currently authenticated user."
+        ),
+        responses={
+            200: serializers.UserAccountSerializer,
+            401: OpenApiResponse(
+                description="Authentication is required."
+            ),
+        },
+    )
 
     def get(self, request):
         serializer = serializers.UserAccountSerializer(

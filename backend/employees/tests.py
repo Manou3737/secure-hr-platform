@@ -1,5 +1,6 @@
 from django.test import TestCase
-from datetime import date
+from datetime import date, datetime, timedelta
+from unittest.mock import patch
 
 from accounts.models import User, SecurityEvent, AuditLog
 
@@ -12,7 +13,7 @@ from django.db import connection
 from django.db import transaction
 
 from django.core.files.uploadedfile import SimpleUploadedFile
-from django.core.exceptions import ValidationError
+from django.core.exceptions import ValidationError, PermissionDenied
 from employees.storage import hr_document_storage
 from django.utils import timezone
 from django.conf import settings
@@ -23,6 +24,7 @@ from .serializers import (
     HRDocumentSerializer,
     LeaveRequestSerializer,
     PerformanceReviewSerializer,
+    DashboardFilterSerializer,
 )
 
 from .models import (
@@ -39,9 +41,16 @@ from .models import (
     PerformanceReview,
     Position,
     HRDocument,
+    DocumentVersion,
+    DocumentReview,
+    DocumentAccessLog,
+    DocumentRetentionPolicy,
 )
 from unittest.mock import patch
 from employees.antivirus import AntivirusUnavailable, MalwareDetected
+from employees.services.onboarding import OnboardingService
+from employees.models import OnboardingActivityTemplate
+from employees.permissions import DashboardPermission
 
 class EmployeeProfileModelTests(TestCase):
     """Tests for the EmployeeProfile model."""
@@ -986,7 +995,6 @@ class DepartmentModelTests(TestCase):
                 code="ENG",
             )
 
-
 class PositionModelTests(TestCase):
     """Test Position model behavior."""
 
@@ -1031,7 +1039,6 @@ class PositionModelTests(TestCase):
 
         with self.assertRaises(ProtectedError):
             self.department.delete()
-
 
 class LeaveRequestModelTests(TestCase):
     """Test LeaveRequest model behavior."""
@@ -2215,7 +2222,6 @@ class LeaveRequestRBACAPITests(TestCase):
             response.data["results"][0]["id"],
             self.leave_request.id,
         )
-
 
 class PayPeriodModelTests(TestCase):
     """Tests for PayPeriod business rules."""
@@ -3834,7 +3840,6 @@ class PerformanceReviewSerializerTests(TestCase):
             "submitted_at",
             serializer.validated_data,
         )
-
 
 class BankAccountViewSetTests(TestCase):
     """Test BankAccount API access control and behavior."""
@@ -5507,6 +5512,347 @@ class HRDocumentModelTests(TestCase):
 
         self.assertSetEqual(actual_statuses, expected_statuses)
 
+class DocumentVersionModelTests(TestCase):
+    """Tests for immutable HR document version records."""
+
+    def setUp(self):
+        self.user = User.objects.create_user(
+            email="version-owner@example.com",
+            name="Version Owner",
+            password="TestPass123!",
+        )
+
+        self.department = Department.objects.create(
+            name="Version Department",
+            code="VER",
+        )
+
+        self.position = Position.objects.create(
+            title="Version Employee",
+            department=self.department,
+        )
+
+        self.profile = EmployeeProfile.objects.create(
+            user=self.user,
+            employee_id="VER-001",
+            department=self.department,
+            position=self.position,
+            hire_date=date(2026, 1, 15),
+        )
+
+        self.document = HRDocument.objects.create(
+            employee=self.profile,
+            title="Employment Contract",
+            document_type=HRDocument.DocumentType.EMPLOYMENT_CONTRACT,
+            original_filename="contract.pdf",
+            storage_key="hr-documents/version/contract.pdf",
+            mime_type="application/pdf",
+            size_bytes=1024,
+            uploaded_by=self.user,
+        )
+
+    def create_version(self, document=None, version_number=1):
+        return DocumentVersion.objects.create(
+            document=document or self.document,
+            version_number=version_number,
+            storage_key=(
+                f"hr-document-versions/{self.document.pk}/"
+                f"version-{version_number}-{document.pk if document else self.document.pk}.pdf"
+            ),
+            original_filename=f"contract-v{version_number}.pdf",
+            mime_type="application/pdf",
+            size_bytes=1024,
+            checksum_sha256="a" * 64,
+            created_by=self.user,
+        )
+
+    def test_version_is_created_with_expected_fields(self):
+        version = self.create_version()
+
+        self.assertIsNotNone(version.id)
+        self.assertEqual(version.document, self.document)
+        self.assertEqual(version.version_number, 1)
+        self.assertEqual(version.created_by, self.user)
+        self.assertEqual(len(version.checksum_sha256), 64)
+        self.assertIsNotNone(version.created_at)
+
+    def test_version_number_must_be_unique_per_document(self):
+        self.create_version(version_number=1)
+
+        with self.assertRaises(IntegrityError):
+            with transaction.atomic():
+                self.create_version(version_number=1)
+
+    def test_different_documents_can_have_the_same_version_number(self):
+        self.create_version(version_number=1)
+
+        other_document = HRDocument.objects.create(
+            employee=self.profile,
+            title="Tax Form",
+            document_type=HRDocument.DocumentType.TAX_FORM,
+            original_filename="tax.pdf",
+            storage_key="hr-documents/version/tax.pdf",
+            mime_type="application/pdf",
+            size_bytes=512,
+            uploaded_by=self.user,
+        )
+
+        version = self.create_version(
+            document=other_document,
+            version_number=1,
+        )
+
+        self.assertEqual(version.version_number, 1)
+        self.assertEqual(version.document, other_document)
+
+    def test_document_cannot_be_deleted_while_versions_exist(self):
+        self.create_version()
+
+        with self.assertRaises(ProtectedError):
+            self.document.delete()
+
+    def test_versions_are_ordered_by_version_number(self):
+        version_two = self.create_version(version_number=2)
+        version_one = self.create_version(version_number=1)
+
+        versions = list(self.document.versions.all())
+
+        self.assertEqual(
+            [version.version_number for version in versions],
+            [1, 2],
+        )
+        self.assertEqual(versions[0].pk, version_one.pk)
+        self.assertEqual(versions[1].pk, version_two.pk)
+
+    def test_version_storage_key_must_be_unique(self):
+        self.create_version(version_number=1)
+
+        with self.assertRaises(IntegrityError):
+            with transaction.atomic():
+                DocumentVersion.objects.create(
+                    document=self.document,
+                    version_number=2,
+                    storage_key=(
+                        f"hr-document-versions/{self.document.pk}/"
+                        f"version-1-{self.document.pk}.pdf"
+                    ),
+                    original_filename="duplicate.pdf",
+                    mime_type="application/pdf",
+                    size_bytes=1024,
+                    checksum_sha256="b" * 64,
+                    created_by=self.user,
+                )
+
+class DocumentVersionServiceTests(TestCase):
+    """Security and lifecycle tests for DocumentVersionService."""
+
+    def setUp(self):
+        self.user = User.objects.create_user(
+            email="version-service@example.com",
+            name="Version Service Employee",
+            password="TestPass123!",
+        )
+
+        self.department = Department.objects.create(
+            name="Version Service Department",
+            code="VSD",
+        )
+
+        self.position = Position.objects.create(
+            title="Version Service Employee",
+            department=self.department,
+        )
+
+        self.profile = EmployeeProfile.objects.create(
+            user=self.user,
+            employee_id="VSD-001",
+            department=self.department,
+            position=self.position,
+            hire_date=date(2026, 1, 15),
+        )
+
+        self.document = HRDocument.objects.create(
+            employee=self.profile,
+            title="Employment Contract",
+            document_type=HRDocument.DocumentType.EMPLOYMENT_CONTRACT,
+            original_filename="contract.pdf",
+            storage_key="hr-documents/version-service/contract.pdf",
+            mime_type="application/pdf",
+            size_bytes=1024,
+            uploaded_by=self.user,
+            status=HRDocument.Status.PENDING_REVIEW,
+        )
+
+    def make_pdf(self, name="contract-v2.pdf", content=b"%PDF-1.7 test"):
+        return SimpleUploadedFile(
+            name,
+            content,
+            content_type="application/pdf",
+        )
+
+    @patch("employees.services.document_version.scan_uploaded_file")
+    @patch("employees.services.document_version.hr_document_storage.save")
+    @patch("employees.services.document_version.hr_document_storage.exists")
+    def test_create_version_after_clean_antivirus_scan(
+        self,
+        mock_exists,
+        mock_storage_save,
+        mock_scan,
+    ):
+        from employees.services.document_version import DocumentVersionService
+
+        mock_exists.return_value = False
+        mock_storage_save.return_value = (
+            f"hr-document-versions/{self.document.pk}/version.pdf"
+        )
+
+        version = DocumentVersionService.create_version(
+            document_id=self.document.pk,
+            uploaded_file=self.make_pdf(),
+            actor=self.user,
+        )
+
+        self.assertEqual(version.document, self.document)
+        self.assertEqual(version.version_number, 1)
+        self.assertEqual(version.created_by, self.user)
+        self.assertEqual(version.mime_type, "application/pdf")
+        self.assertEqual(len(version.checksum_sha256), 64)
+        mock_scan.assert_called_once()
+
+    @patch("employees.services.document_version.scan_uploaded_file")
+    def test_reject_version_when_antivirus_detects_malware(
+        self,
+        mock_scan,
+    ):
+        from employees.services.document_version import DocumentVersionService
+
+        mock_scan.side_effect = MalwareDetected("malware")
+
+        with self.assertRaises(ValidationError):
+            DocumentVersionService.create_version(
+                document_id=self.document.pk,
+                uploaded_file=self.make_pdf(),
+                actor=self.user,
+            )
+
+        self.assertFalse(
+            DocumentVersion.objects.filter(
+                document=self.document
+            ).exists()
+        )
+
+    @patch("employees.services.document_version.scan_uploaded_file")
+    def test_reject_version_when_antivirus_is_unavailable(
+        self,
+        mock_scan,
+    ):
+        from employees.services.document_version import DocumentVersionService
+
+        mock_scan.side_effect = AntivirusUnavailable("unavailable")
+
+        with self.assertRaises(ValidationError):
+            DocumentVersionService.create_version(
+                document_id=self.document.pk,
+                uploaded_file=self.make_pdf(),
+                actor=self.user,
+            )
+
+        self.assertFalse(
+            DocumentVersion.objects.filter(
+                document=self.document
+            ).exists()
+        )
+
+    def test_reject_empty_file(self):
+        from employees.services.document_version import DocumentVersionService
+
+        with self.assertRaises(ValidationError):
+            DocumentVersionService.create_version(
+                document_id=self.document.pk,
+                uploaded_file=self.make_pdf(content=b""),
+                actor=self.user,
+            )
+
+    def test_reject_file_with_invalid_signature(self):
+        from employees.services.document_version import DocumentVersionService
+
+        with self.assertRaises(ValidationError):
+            DocumentVersionService.create_version(
+                document_id=self.document.pk,
+                uploaded_file=self.make_pdf(content=b"not a PDF"),
+                actor=self.user,
+            )
+
+    def test_reject_unsupported_extension(self):
+        from employees.services.document_version import DocumentVersionService
+
+        uploaded_file = SimpleUploadedFile(
+            "contract.exe",
+            b"MZ executable",
+            content_type="application/octet-stream",
+        )
+
+        with self.assertRaises(ValidationError):
+            DocumentVersionService.create_version(
+                document_id=self.document.pk,
+                uploaded_file=uploaded_file,
+                actor=self.user,
+            )
+
+    @patch("employees.services.document_version.scan_uploaded_file")
+    def test_employee_cannot_version_another_employees_document(
+        self,
+        mock_scan,
+    ):
+        from employees.services.document_version import DocumentVersionService
+
+        other_user = User.objects.create_user(
+            email="another-version-owner@example.com",
+            name="Another Employee",
+            password="TestPass123!",
+        )
+
+        with self.assertRaises(PermissionDenied):
+            DocumentVersionService.create_version(
+                document_id=self.document.pk,
+                uploaded_file=self.make_pdf(),
+                actor=other_user,
+            )
+
+        mock_scan.assert_not_called()
+
+    @patch("employees.services.document_version.scan_uploaded_file")
+    def test_archived_document_cannot_be_versioned(self, mock_scan):
+        from employees.services.document_version import DocumentVersionService
+
+        self.document.status = HRDocument.Status.ARCHIVED
+        self.document.save(update_fields=["status"])
+
+        with self.assertRaises(ValidationError):
+            DocumentVersionService.create_version(
+                document_id=self.document.pk,
+                uploaded_file=self.make_pdf(),
+                actor=self.user,
+            )
+
+        mock_scan.assert_not_called()
+
+    @patch("employees.services.document_version.scan_uploaded_file")
+    def test_quarantined_document_cannot_be_versioned(self, mock_scan):
+        from employees.services.document_version import DocumentVersionService
+
+        self.document.status = HRDocument.Status.QUARANTINED
+        self.document.save(update_fields=["status"])
+
+        with self.assertRaises(ValidationError):
+            DocumentVersionService.create_version(
+                document_id=self.document.pk,
+                uploaded_file=self.make_pdf(),
+                actor=self.user,
+            )
+
+        mock_scan.assert_not_called()
+
 class PrivateHRDocumentStorageTests(TestCase):
     """Tests ensuring local HR document storage has no public URLs."""
 
@@ -5663,10 +6009,16 @@ class HRDocumentSerializerTests(TestCase):
 
 
     @patch(
-        "employees.serializers.scan_uploaded_file",
+       "employees.services.document_upload.scan_uploaded_file",
         side_effect=MalwareDetected("Test malware"),
     )
     def test_malicious_file_is_quarantined(self, mock_scan):
+        from unittest.mock import patch
+        from employees.storage import (
+            hr_document_storage,
+            quarantine_hr_document,
+        )
+
         uploaded_file = SimpleUploadedFile(
             "infected-contract.pdf",
             b"%PDF-1.7 test document content",
@@ -5685,6 +6037,70 @@ class HRDocumentSerializerTests(TestCase):
 
         self.assertTrue(serializer.is_valid(), serializer.errors)
 
+        with patch(
+             "employees.services.document_upload.quarantine_hr_document",
+            wraps=quarantine_hr_document,
+        ) as mock_quarantine:
+            document = serializer.save(
+                employee=self.profile,
+                uploaded_by=self.user,
+            )
+
+        self.assertEqual(
+            document.status,
+            HRDocument.Status.QUARANTINED,
+        )
+        mock_scan.assert_called_once()
+        mock_quarantine.assert_called_once()
+
+        original_key = mock_quarantine.call_args.args[0]
+        quarantined_key = document.storage_key
+
+        try:
+            self.assertTrue(
+                quarantined_key.startswith("hr-document-quarantine/"),
+                quarantined_key,
+            )
+            self.assertTrue(
+                hr_document_storage.exists(quarantined_key)
+            )
+            self.assertFalse(
+                hr_document_storage.exists(original_key)
+            )
+        finally:
+            hr_document_storage.delete(quarantined_key)
+
+    @patch(
+       "employees.services.document_upload.scan_uploaded_file",
+        side_effect=MalwareDetected("Test malware"),
+    )
+    @patch(
+         "employees.services.document_upload.quarantine_hr_document",
+        return_value=None,
+    )
+    def test_malicious_file_remains_quarantined_if_move_fails(
+        self,
+        mock_quarantine,
+        mock_scan,
+    ):
+        uploaded_file = SimpleUploadedFile(
+            "infected-contract.pdf",
+            b"%PDF-1.7 test document content",
+            content_type="application/pdf",
+        )
+
+        serializer = HRDocumentSerializer(
+            data={
+                "title": "Infected Contract Move Failure",
+                "document_type": (
+                    HRDocument.DocumentType.EMPLOYMENT_CONTRACT
+                ),
+                "document_file": uploaded_file,
+            },
+        )
+
+        self.assertTrue(serializer.is_valid(), serializer.errors)
+
         document = serializer.save(
             employee=self.profile,
             uploaded_by=self.user,
@@ -5694,11 +6110,76 @@ class HRDocumentSerializerTests(TestCase):
             document.status,
             HRDocument.Status.QUARANTINED,
         )
+        self.assertTrue(
+            document.storage_key.startswith(
+                "hr-document-quarantine/blocked/"
+            )
+        )
+        self.assertFalse(
+            hr_document_storage.exists(document.storage_key)
+        )
         mock_scan.assert_called_once()
+        mock_quarantine.assert_called_once()
+
+    @patch(
+         "employees.services.document_upload.hr_document_storage.delete",
+        side_effect=OSError("Storage deletion failed"),
+    )
+    @patch(
+         "employees.services.document_upload.quarantine_hr_document",
+        return_value=None,
+    )
+    @patch(
+       "employees.services.document_upload.scan_uploaded_file",
+        side_effect=MalwareDetected("Malware detected"),
+    )
+    def test_infected_document_is_blocked_if_quarantine_and_delete_fail(
+        self,
+        mock_scan,
+        mock_quarantine,
+        mock_delete,
+    ):
+        uploaded_file = SimpleUploadedFile(
+            "infected-contract.pdf",
+            b"%PDF-1.7 test document content",
+            content_type="application/pdf",
+        )
+
+        serializer = HRDocumentSerializer(
+            data={
+                "title": "Infected Contract Delete Failure",
+                "document_type": (
+                    HRDocument.DocumentType.EMPLOYMENT_CONTRACT
+                ),
+                "document_file": uploaded_file,
+            },
+        )
+
+        self.assertTrue(serializer.is_valid(), serializer.errors)
+
+        document = serializer.save(
+            employee=self.profile,
+            uploaded_by=self.user,
+        )
+
+        document.refresh_from_db()
+
+        self.assertEqual(
+            document.status,
+            HRDocument.Status.QUARANTINED,
+        )
+        self.assertTrue(
+            document.storage_key.startswith(
+                "hr-document-quarantine/blocked/"
+            )
+        )
+        mock_scan.assert_called_once()
+        mock_quarantine.assert_called_once()
+        mock_delete.assert_called_once()
 
 
     @patch(
-        "employees.serializers.scan_uploaded_file",
+       "employees.services.document_upload.scan_uploaded_file",
         side_effect=AntivirusUnavailable("Scanner unavailable"),
     )
     def test_document_remains_pending_scan_when_antivirus_is_unavailable(
@@ -5735,7 +6216,7 @@ class HRDocumentSerializerTests(TestCase):
         mock_scan.assert_called_once()
 
 
-    @patch("employees.serializers.scan_uploaded_file")
+    @patch("employees.services.document_upload.scan_uploaded_file")
     def test_create_stores_file_and_calculates_sha256(
         self,
         mock_scan,
@@ -5783,7 +6264,7 @@ class HRDocumentSerializerTests(TestCase):
         finally:
             hr_document_storage.delete(document.storage_key)
 
-    @patch("employees.serializers.scan_uploaded_file")
+    @patch("employees.services.document_upload.scan_uploaded_file")
     def test_create_removes_stored_file_if_database_creation_fails(
         self,
         mock_scan,
@@ -5815,7 +6296,7 @@ class HRDocumentSerializerTests(TestCase):
             wraps=hr_document_storage.save,
         ) as storage_save:
             with patch(
-                "employees.serializers.hr_document_storage.delete",
+                 "employees.services.document_upload.hr_document_storage.delete",
                 wraps=hr_document_storage.delete,
             ) as storage_delete:
                 with patch(
@@ -6031,6 +6512,7 @@ class HRDocumentRBACAPITests(TestCase):
             status.HTTP_404_NOT_FOUND,
         )
 
+
     def test_employee_can_retrieve_own_document(self):
         self.authenticate(self.employee)
 
@@ -6043,6 +6525,49 @@ class HRDocumentRBACAPITests(TestCase):
             response.data["id"],
             str(self.document.pk),
         )
+
+        audit_entry = DocumentAccessLog.objects.get(
+            document=self.document,
+            user=self.employee,
+            action=DocumentAccessLog.Action.VIEW,
+        )
+        self.assertEqual(
+            audit_entry.details,
+            "HR document metadata viewed.",
+        )
+
+
+    def test_hr_manager_can_view_document_review_history(self):
+        self.authenticate(self.hr_manager)
+
+        response = self.client.get(
+            f"{self.url}{self.document.pk}/reviews/"
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data, [])
+
+    def test_employee_cannot_view_another_employees_review_history(self):
+        self.authenticate(self.employee)
+
+        response = self.client.get(
+            f"{self.url}{self.other_document.pk}/reviews/"
+        )
+
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_404_NOT_FOUND,
+        )
+
+    def test_employee_can_view_own_document_review_history(self):
+        self.authenticate(self.employee)
+
+        response = self.client.get(
+            f"{self.url}{self.document.pk}/reviews/"
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data, [])
 
     def test_hr_admin_can_list_documents(self):
         self.authenticate(self.hr_admin)
@@ -6081,7 +6606,7 @@ class HRDocumentRBACAPITests(TestCase):
             status.HTTP_403_FORBIDDEN,
         )
 
-    @patch("employees.serializers.scan_uploaded_file")
+    @patch("employees.services.document_upload.scan_uploaded_file")
     def test_employee_can_upload_document_to_own_profile(self,mock_scan,):
         self.authenticate(self.employee)
 
@@ -6113,7 +6638,7 @@ class HRDocumentRBACAPITests(TestCase):
         self.assertEqual(document.employee, self.profile)
         self.assertEqual(document.uploaded_by, self.employee)
 
-    @patch("employees.serializers.scan_uploaded_file")
+    @patch("employees.services.document_upload.scan_uploaded_file")
     def test_employee_cannot_upload_document_for_another_profile(self, mock_scan,):
         self.authenticate(self.employee)
 
@@ -6165,6 +6690,18 @@ class HRDocumentRBACAPITests(TestCase):
             self.hr_manager,
         )
         self.assertIsNotNone(self.document.verified_at)
+        review = DocumentReview.objects.get(
+            document=self.document,
+        )
+        self.assertEqual(
+            review.reviewer,
+            self.hr_manager,
+        )
+        self.assertEqual(
+            review.decision,
+            DocumentReview.Decision.APPROVED,
+        )
+        self.assertEqual(review.comment, "")
         audit = AuditLog.objects.get(
             action="HR_DOCUMENT_VERIFIED",
         )
@@ -6227,7 +6764,21 @@ class HRDocumentRBACAPITests(TestCase):
             self.document.rejection_reason,
             "The document is incomplete.",
         )
-
+        review = DocumentReview.objects.get(
+            document=self.document,
+        )
+        self.assertEqual(
+            review.reviewer,
+            self.hr_manager,
+        )
+        self.assertEqual(
+            review.decision,
+            DocumentReview.Decision.REJECTED,
+        )
+        self.assertEqual(
+            review.comment,
+            "The document is incomplete.",
+        )
         audit = AuditLog.objects.get(
             action="HR_DOCUMENT_REJECTED",
         )
@@ -6392,3 +6943,5860 @@ class HRDocumentRBACAPITests(TestCase):
         self.assertEqual(response.status_code, 403)
         self.document.refresh_from_db()
         self.assertEqual(self.document.status, "VERIFIED")
+
+    def test_employee_can_download_own_verified_document(self):
+        from io import BytesIO
+        from unittest.mock import patch
+
+        self.document.status = HRDocument.Status.VERIFIED
+        self.document.save(update_fields=["status"])
+
+        self.authenticate(self.employee)
+
+        with patch(
+            "employees.views.hr_document_storage.open",
+            return_value=BytesIO(b"%PDF-1.7 verified test document"),
+        ):
+            response = self.client.get(
+                f"{self.url}{self.document.pk}/download/"
+            )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIn(
+            "attachment",
+            response["Content-Disposition"],
+        )
+        self.assertIn(
+            "contract.pdf",
+            response["Content-Disposition"],
+        )
+
+    def test_quarantined_document_cannot_be_downloaded(self):
+        from unittest.mock import patch
+
+        self.document.status = HRDocument.Status.QUARANTINED
+        self.document.save(update_fields=["status"])
+
+        self.authenticate(self.super_admin)
+
+        with patch(
+            "employees.views.hr_document_storage.open"
+        ) as mock_open:
+            response = self.client.get(
+                f"{self.url}{self.document.pk}/download/"
+            )
+
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_403_FORBIDDEN,
+        )
+        mock_open.assert_not_called()
+
+    def test_employee_cannot_download_another_employees_document(self):
+        self.other_document.status = HRDocument.Status.VERIFIED
+        self.other_document.save(update_fields=["status"])
+
+        self.authenticate(self.employee)
+
+        response = self.client.get(
+            f"{self.url}{self.other_document.pk}/download/"
+        )
+
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_404_NOT_FOUND,
+        )
+
+    def test_unauthenticated_user_cannot_download_document(self):
+        self.document.status = HRDocument.Status.VERIFIED
+        self.document.save(update_fields=["status"])
+
+        response = self.client.get(
+            f"{self.url}{self.document.pk}/download/"
+        )
+
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_401_UNAUTHORIZED,
+        )
+
+    def test_hr_manager_cannot_retrieve_restricted_document(self):
+        self.document.confidentiality = "RESTRICTED"
+        self.document.save(update_fields=["confidentiality"])
+
+        self.client.force_authenticate(user=self.hr_manager)
+
+        response = self.client.get(
+            f"{self.url}{self.document.pk}/"
+        )
+
+        self.assertEqual(response.status_code, 404)
+
+    def test_employee_cannot_retrieve_another_employees_document(self):
+        self.client.force_authenticate(user=self.employee)
+
+        response = self.client.get(
+            f"{self.url}{self.other_document.pk}/"
+        )
+
+        self.assertEqual(response.status_code, 404)
+
+    def test_inactive_employee_cannot_list_documents(self):
+        self.employee.is_active = False
+        self.employee.save(update_fields=["is_active"])
+
+        self.client.force_authenticate(user=self.employee)
+
+        response = self.client.get(self.url)
+
+        self.assertEqual(response.status_code, 403)
+
+    def test_employee_cannot_update_another_employees_document(self):
+        self.client.force_authenticate(user=self.employee)
+
+        response = self.client.patch(
+            f"{self.url}{self.other_document.pk}/",
+            {"title": "Unauthorized change"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 404)
+
+    def test_employee_cannot_update_verified_document(self):
+        self.document.status = HRDocument.Status.VERIFIED
+        self.document.save(update_fields=["status"])
+
+        self.client.force_authenticate(user=self.employee)
+
+        response = self.client.patch(
+            f"{self.url}{self.document.pk}/",
+            {"title": "Unauthorized change"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 403)
+
+    def test_hr_manager_cannot_update_document(self):
+        self.client.force_authenticate(user=self.hr_manager)
+
+        response = self.client.patch(
+            f"{self.url}{self.document.pk}/",
+            {"title": "Unauthorized change"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 403)
+
+    def test_employee_cannot_update_document_metadata(self):
+        original_metadata = {"source": "original"}
+        self.document.metadata = original_metadata
+        self.document.save(update_fields=["metadata"])
+
+        self.client.force_authenticate(user=self.employee)
+
+        response = self.client.patch(
+            f"{self.url}{self.document.pk}/",
+            {"metadata": {"source": "tampered"}},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.document.refresh_from_db()
+        self.assertEqual(self.document.metadata, original_metadata)
+
+    def test_employee_cannot_update_document_expiration(self):
+        from datetime import date
+
+        original_expiration = date(2027, 12, 31)
+        self.document.expires_at = original_expiration
+        self.document.save(update_fields=["expires_at"])
+
+        self.client.force_authenticate(user=self.employee)
+
+        response = self.client.patch(
+            f"{self.url}{self.document.pk}/",
+            {"expires_at": "2028-12-31"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.document.refresh_from_db()
+        self.assertEqual(self.document.expires_at, original_expiration)
+
+    def test_document_cannot_be_deleted_directly(self):
+        self.client.force_authenticate(user=self.hr_admin)
+
+        response = self.client.delete(
+            f"{self.url}{self.document.pk}/"
+        )
+
+        self.assertIn(response.status_code, (403, 405))
+        self.assertTrue(
+            HRDocument.objects.filter(pk=self.document.pk).exists()
+        )
+
+class DocumentAccessServiceTests(TestCase):
+    """Unit tests for HR document access rules."""
+
+    def setUp(self):
+        from employees.services.document_access import (
+            DocumentAccessService,
+        )
+
+        self.access = DocumentAccessService
+
+        self.super_admin = User.objects.create_user(
+            email="access-admin@example.com",
+            name="Access Super Admin",
+            password="StrongPassword123!",
+            role="SUPER_ADMIN",
+        )
+        self.hr_admin = User.objects.create_user(
+            email="access-hradmin@example.com",
+            name="Access HR Admin",
+            password="StrongPassword123!",
+            role="HR_ADMIN",
+        )
+        self.hr_manager = User.objects.create_user(
+            email="access-manager@example.com",
+            name="Access HR Manager",
+            password="StrongPassword123!",
+            role="HR_MANAGER",
+        )
+        self.employee = User.objects.create_user(
+            email="access-employee@example.com",
+            name="Access Employee",
+            password="StrongPassword123!",
+            role="EMPLOYEE",
+        )
+        self.other_employee = User.objects.create_user(
+            email="access-other@example.com",
+            name="Other Access Employee",
+            password="StrongPassword123!",
+            role="EMPLOYEE",
+        )
+
+        department = Department.objects.create(
+            name="Access Test Department",
+            code="ATD",
+        )
+        position = Position.objects.create(
+            title="Access Test Position",
+            department=department,
+        )
+
+        self.profile = EmployeeProfile.objects.create(
+            user=self.employee,
+            employee_id="ACCESS-001",
+            department=department,
+            position=position,
+            hire_date=date(2026, 1, 15),
+        )
+        self.other_profile = EmployeeProfile.objects.create(
+            user=self.other_employee,
+            employee_id="ACCESS-002",
+            department=department,
+            position=position,
+            hire_date=date(2026, 2, 1),
+        )
+
+        self.document = HRDocument.objects.create(
+            employee=self.profile,
+            title="Access Test Contract",
+            document_type=HRDocument.DocumentType.EMPLOYMENT_CONTRACT,
+            original_filename="access-contract.pdf",
+            storage_key="hr-documents/access/contract.pdf",
+            mime_type="application/pdf",
+            size_bytes=1024,
+            uploaded_by=self.hr_admin,
+        )
+
+        self.other_document = HRDocument.objects.create(
+            employee=self.other_profile,
+            title="Other Access Contract",
+            document_type=HRDocument.DocumentType.EMPLOYMENT_CONTRACT,
+            original_filename="other-contract.pdf",
+            storage_key="hr-documents/access/other-contract.pdf",
+            mime_type="application/pdf",
+            size_bytes=1024,
+            uploaded_by=self.hr_admin,
+        )
+
+    def test_privileged_roles_can_view_restricted_document(self):
+        self.document.confidentiality = "RESTRICTED"
+
+        self.assertTrue(
+            self.access.can_view_document(
+                self.super_admin, self.document
+            )
+        )
+        self.assertTrue(
+            self.access.can_view_document(
+                self.hr_admin, self.document
+            )
+        )
+
+    def test_hr_manager_cannot_view_restricted_document(self):
+        self.document.confidentiality = "RESTRICTED"
+
+        self.assertFalse(
+            self.access.can_view_document(
+                self.hr_manager, self.document
+            )
+        )
+
+    def test_employee_can_view_own_confidential_document(self):
+        self.document.confidentiality = "CONFIDENTIAL"
+
+        self.assertTrue(
+            self.access.can_view_document(
+                self.employee, self.document
+            )
+        )
+
+    def test_employee_cannot_view_another_employees_document(self):
+        self.assertFalse(
+            self.access.can_view_document(
+                self.employee, self.other_document
+            )
+        )
+
+    def test_employee_cannot_view_restricted_document(self):
+        self.document.confidentiality = "RESTRICTED"
+
+        self.assertFalse(
+            self.access.can_view_document(
+                self.employee, self.document
+            )
+        )
+
+    def test_download_requires_verified_status(self):
+        self.document.status = HRDocument.Status.PENDING_REVIEW
+
+        self.assertFalse(
+            self.access.can_download_document(
+                self.super_admin, self.document
+            )
+        )
+
+    def test_employee_can_download_own_verified_document(self):
+        self.document.status = HRDocument.Status.VERIFIED
+
+        self.assertTrue(
+            self.access.can_download_document(
+                self.employee, self.document
+            )
+        )
+
+    def test_employee_cannot_download_another_employees_document(self):
+        self.other_document.status = HRDocument.Status.VERIFIED
+
+        self.assertFalse(
+            self.access.can_download_document(
+                self.employee, self.other_document
+            )
+        )
+
+    def test_hr_manager_cannot_download_document(self):
+        self.document.status = HRDocument.Status.VERIFIED
+
+        self.assertFalse(
+            self.access.can_download_document(
+                self.hr_manager, self.document
+            )
+        )
+
+    def test_inactive_user_cannot_view_document(self):
+        self.employee.is_active = False
+
+        self.assertFalse(
+            self.access.can_view_document(
+                self.employee, self.document
+            )
+        )
+
+    def test_inactive_user_cannot_download_document(self):
+        self.employee.is_active = False
+        self.document.status = HRDocument.Status.VERIFIED
+
+        self.assertFalse(
+            self.access.can_download_document(
+                self.employee, self.document
+            )
+        )
+
+    def test_employee_cannot_manage_verified_document(self):
+        self.document.status = HRDocument.Status.VERIFIED
+
+        self.assertFalse(
+            self.access.can_manage_document(
+                self.employee, self.document
+            )
+        )
+
+    def test_employee_can_manage_own_pending_document(self):
+        self.document.status = HRDocument.Status.PENDING_REVIEW
+
+        self.assertTrue(
+            self.access.can_manage_document(
+                self.employee, self.document
+            )
+        )
+
+    def test_accessible_queryset_excludes_restricted_documents(self):
+        self.document.confidentiality = "RESTRICTED"
+        self.document.save(update_fields=["confidentiality"])
+
+        accessible = self.access.get_accessible_documents(
+            self.employee
+        )
+
+        self.assertFalse(
+            accessible.filter(pk=self.document.pk).exists()
+        )
+        self.assertTrue(
+            accessible.filter(pk=self.other_document.pk).exists()
+            is False
+        )
+
+class OnboardingServiceTests(TestCase):
+    """Tests for onboarding template publication and journey creation."""
+
+    def setUp(self):
+        from django.contrib.auth import get_user_model
+        from employees.models import (
+            EmployeeProfile,
+            OnboardingActivityTemplate,
+            OnboardingPhase,
+            OnboardingTemplate,
+        )
+
+        User = get_user_model()
+        self.admin = User.objects.create_user(
+            email="onboarding-admin@example.com",
+            name="Onboarding Admin",
+            password="TestPassword123!",
+            is_active=True,
+        )
+
+        self.employee_user = User.objects.create_user(
+            email="onboarding-employee@example.com",
+            name="Onboarding Employee",
+            password="TestPassword123!",
+            is_active=True,
+        )
+
+        from datetime import date
+
+        self.employee = EmployeeProfile.objects.create(
+            user=self.employee_user,
+            hire_date=date.today(),
+        )
+
+        self.template = OnboardingTemplate.objects.create(
+            name="Standard onboarding",
+            description="Standard employee onboarding",
+            version=1,
+            created_by=self.admin,
+        )
+
+        self.phase = OnboardingPhase.objects.create(
+            template=self.template,
+            name="First day",
+            description="First-day activities",
+            order=1,
+        )
+
+        self.activity = OnboardingActivityTemplate.objects.create(
+            phase=self.phase,
+            name="Complete HR paperwork",
+            description="Complete the required HR forms",
+            order=1,
+            is_required=True,
+            default_due_days=3,
+        )
+
+    def test_publish_complete_template(self):
+        published = OnboardingService.publish_template(self.template.pk)
+
+        self.assertEqual(
+            published.status,
+            self.template.Status.PUBLISHED,
+        )
+        self.assertIsNotNone(published.published_at)
+
+    def test_cannot_publish_template_without_phases(self):
+        self.activity.delete()
+        self.phase.delete()
+
+        with self.assertRaises(ValidationError):
+            OnboardingService.publish_template(self.template.pk)
+
+
+    def test_cannot_publish_phase_without_activities(self):
+        self.activity.delete()
+
+        with self.assertRaises(ValidationError):
+            OnboardingService.publish_template(self.template.pk)
+
+    def test_cannot_publish_template_twice(self):
+        OnboardingService.publish_template(self.template.pk)
+
+        with self.assertRaises(ValidationError):
+            OnboardingService.publish_template(self.template.pk)
+
+    def test_cannot_create_journey_from_draft_template(self):
+        with self.assertRaises(ValidationError):
+            OnboardingService.create_journey(
+                employee_id=self.employee.pk,
+                template_id=self.template.pk,
+                created_by=self.admin,
+            )
+
+    def test_create_journey_preserves_template_version(self):
+        OnboardingService.publish_template(self.template.pk)
+
+        journey = OnboardingService.create_journey(
+            employee_id=self.employee.pk,
+            template_id=self.template.pk,
+            created_by=self.admin,
+        )
+
+        self.assertEqual(journey.employee_id, self.employee.pk)
+        self.assertEqual(journey.template_id, self.template.pk)
+        self.assertEqual(journey.template_version, self.template.version)
+
+    def test_create_journey_creates_tasks_from_template_activities(self):
+        OnboardingService.publish_template(self.template.pk)
+
+        journey = OnboardingService.create_journey(
+            employee_id=self.employee.pk,
+            template_id=self.template.pk,
+            created_by=self.admin,
+        )
+
+        tasks = journey.tasks.all()
+
+        self.assertEqual(tasks.count(), 1)
+        self.assertEqual(tasks.first().title, self.activity.name)
+        self.assertEqual(
+            tasks.first().description,
+            self.activity.description,
+        )
+
+    def test_cannot_create_journey_for_inactive_employee(self):
+        self.employee_user.is_active = False
+        self.employee_user.save(update_fields=["is_active"])
+
+        OnboardingService.publish_template(self.template.pk)
+
+        with self.assertRaises(ValidationError):
+            OnboardingService.create_journey(
+                employee_id=self.employee.pk,
+                template_id=self.template.pk,
+                created_by=self.admin,
+            )
+
+    def test_cannot_create_journey_for_nonexistent_employee(self):
+        from uuid import uuid4
+
+        OnboardingService.publish_template(self.template.pk)
+
+        with self.assertRaises(ValidationError):
+            OnboardingService.create_journey(
+                employee_id=uuid4(),
+                template_id=self.template.pk,
+                created_by=self.admin,
+            )
+
+    def test_cannot_create_journey_from_nonexistent_template(self):
+        from uuid import uuid4
+
+        with self.assertRaises(ValidationError):
+            OnboardingService.create_journey(
+                employee_id=self.employee.pk,
+                template_id=uuid4(),
+                created_by=self.admin,
+            )
+
+    def test_cannot_create_duplicate_active_journey(self):
+        OnboardingService.publish_template(self.template.pk)
+
+        OnboardingService.create_journey(
+            employee_id=self.employee.pk,
+            template_id=self.template.pk,
+            created_by=self.admin,
+        )
+
+        with self.assertRaises(ValidationError):
+            OnboardingService.create_journey(
+                employee_id=self.employee.pk,
+                template_id=self.template.pk,
+                created_by=self.admin,
+            )
+
+    def test_can_create_new_journey_after_previous_journey_is_cancelled(self):
+        OnboardingService.publish_template(self.template.pk)
+
+        first_journey = OnboardingService.create_journey(
+            employee_id=self.employee.pk,
+            template_id=self.template.pk,
+            created_by=self.admin,
+        )
+
+        first_journey.status = first_journey.Status.CANCELLED
+        first_journey.save(update_fields=["status", "updated_at"])
+
+        second_journey = OnboardingService.create_journey(
+            employee_id=self.employee.pk,
+            template_id=self.template.pk,
+            created_by=self.admin,
+        )
+
+        self.assertNotEqual(first_journey.pk, second_journey.pk)
+        self.assertEqual(
+            second_journey.status,
+            second_journey.Status.PENDING,
+        )
+
+    def test_can_create_new_journey_after_previous_journey_is_completed(self):
+        OnboardingService.publish_template(self.template.pk)
+
+        first_journey = OnboardingService.create_journey(
+            employee_id=self.employee.pk,
+            template_id=self.template.pk,
+            created_by=self.admin,
+        )
+
+        first_journey.status = first_journey.Status.COMPLETED
+        first_journey.save(update_fields=["status", "updated_at"])
+
+        second_journey = OnboardingService.create_journey(
+            employee_id=self.employee.pk,
+            template_id=self.template.pk,
+            created_by=self.admin,
+        )
+
+        self.assertNotEqual(first_journey.pk, second_journey.pk)
+        self.assertEqual(
+            second_journey.status,
+            second_journey.Status.PENDING,
+        )
+
+    def test_cannot_create_journey_with_inactive_creator(self):
+        self.admin.is_active = False
+        self.admin.save(update_fields=["is_active"])
+
+        OnboardingService.publish_template(self.template.pk)
+
+        with self.assertRaises(ValidationError):
+            OnboardingService.create_journey(
+                employee_id=self.employee.pk,
+                template_id=self.template.pk,
+                created_by=self.admin,
+            )
+
+    def test_cannot_create_journey_with_unauthenticated_creator(self):
+        from django.contrib.auth.models import AnonymousUser
+
+        OnboardingService.publish_template(self.template.pk)
+
+        with self.assertRaises(ValidationError):
+            OnboardingService.create_journey(
+                employee_id=self.employee.pk,
+                template_id=self.template.pk,
+                created_by=AnonymousUser(),
+            )
+
+    def test_create_journey_preserves_target_completion_date(self):
+        from datetime import timedelta
+
+        target_date = timezone.now().date() + timedelta(days=30)
+        OnboardingService.publish_template(self.template.pk)
+
+        journey = OnboardingService.create_journey(
+            employee_id=self.employee.pk,
+            template_id=self.template.pk,
+            created_by=self.admin,
+            target_completion_date=target_date,
+        )
+
+        self.assertEqual(journey.target_completion_date, target_date)
+
+    def test_create_journey_creates_task_for_each_activity(self):
+        OnboardingService.publish_template(self.template.pk)
+
+        journey = OnboardingService.create_journey(
+            employee_id=self.employee.pk,
+            template_id=self.template.pk,
+            created_by=self.admin,
+        )
+
+        self.assertEqual(journey.tasks.count(), 1)
+
+    def test_create_journey_creates_tasks_for_multiple_activities(self):
+        from employees.models import OnboardingActivityTemplate
+
+        OnboardingActivityTemplate.objects.create(
+            phase=self.phase,
+            name="Set up workstation",
+            order=2,
+            is_required=True,
+            default_due_days=5,
+        )
+
+        OnboardingService.publish_template(self.template.pk)
+
+        journey = OnboardingService.create_journey(
+            employee_id=self.employee.pk,
+            template_id=self.template.pk,
+            created_by=self.admin,
+        )
+
+        self.assertEqual(journey.tasks.count(), 2)
+
+    def test_cannot_create_journey_from_unpublished_template(self):
+        from employees.models import OnboardingTemplate, OnboardingJourney
+
+        self.assertEqual(
+            self.template.status,
+            OnboardingTemplate.Status.DRAFT,
+        )
+
+        with self.assertRaises(ValidationError):
+            OnboardingService.create_journey(
+                employee_id=self.employee.pk,
+                template_id=self.template.pk,
+                created_by=self.admin,
+            )
+
+        self.assertEqual(
+            OnboardingJourney.objects.filter(
+                employee=self.employee,
+                template=self.template,
+            ).count(),
+            0,
+        )
+
+    def test_cannot_publish_already_published_template(self):
+        from employees.models import OnboardingTemplate
+
+        OnboardingService.publish_template(self.template.pk)
+
+        self.template.refresh_from_db()
+        original_published_at = self.template.published_at
+
+        with self.assertRaises(ValidationError):
+            OnboardingService.publish_template(self.template.pk)
+
+        self.template.refresh_from_db()
+
+        self.assertEqual(
+            self.template.status,
+            OnboardingTemplate.Status.PUBLISHED,
+        )
+        self.assertEqual(
+            self.template.published_at,
+            original_published_at,
+        )
+
+    def test_cannot_publish_template_with_phase_without_activities(self):
+        from employees.models import OnboardingActivityTemplate
+
+        self.activity.delete()
+
+        with self.assertRaises(ValidationError):
+            OnboardingService.publish_template(self.template.pk)
+
+        self.template.refresh_from_db()
+
+        self.assertEqual(
+            self.template.status,
+            self.template.Status.DRAFT,
+        )
+
+    def test_create_journey_preserves_template_version(self):
+        OnboardingService.publish_template(self.template.pk)
+
+        journey = OnboardingService.create_journey(
+            employee_id=self.employee.pk,
+            template_id=self.template.pk,
+            created_by=self.admin,
+        )
+
+        self.assertEqual(
+            journey.template_version,
+            self.template.version,
+        )
+
+    def test_create_journey_does_not_modify_published_template(self):
+        from employees.models import OnboardingTemplate
+
+        OnboardingService.publish_template(self.template.pk)
+
+        self.template.refresh_from_db()
+        original_published_at = self.template.published_at
+        original_version = self.template.version
+
+        OnboardingService.create_journey(
+            employee_id=self.employee.pk,
+            template_id=self.template.pk,
+            created_by=self.admin,
+        )
+
+        self.template.refresh_from_db()
+
+        self.assertEqual(
+            self.template.status,
+            OnboardingTemplate.Status.PUBLISHED,
+        )
+        self.assertEqual(
+            self.template.published_at,
+            original_published_at,
+        )
+        self.assertEqual(self.template.version, original_version)
+
+    def test_failed_task_creation_rolls_back_journey(self):
+        from unittest.mock import patch
+        from employees.models import OnboardingJourney
+
+        OnboardingService.publish_template(self.template.pk)
+
+        initial_count = OnboardingJourney.objects.filter(
+            employee=self.employee,
+            template=self.template,
+        ).count()
+
+        with patch(
+            "employees.services.onboarding.OnboardingTask.objects.bulk_create",
+            side_effect=RuntimeError("Simulated task creation failure"),
+        ):
+            with self.assertRaises(RuntimeError):
+                OnboardingService.create_journey(
+                    employee_id=self.employee.pk,
+                    template_id=self.template.pk,
+                    created_by=self.admin,
+                )
+
+        final_count = OnboardingJourney.objects.filter(
+            employee=self.employee,
+            template=self.template,
+        ).count()
+
+        self.assertEqual(final_count, initial_count)
+
+    def test_create_journey_creates_one_task_per_activity(self):
+        from employees.models import OnboardingActivityTemplate
+
+        OnboardingActivityTemplate.objects.create(
+            phase=self.phase,
+            name="Set up workstation",
+            order=2,
+            is_required=True,
+            default_due_days=5,
+        )
+
+        OnboardingService.publish_template(self.template.pk)
+
+        journey = OnboardingService.create_journey(
+            employee_id=self.employee.pk,
+            template_id=self.template.pk,
+            created_by=self.admin,
+        )
+
+        task_activity_ids = list(
+            journey.tasks.values_list(
+                "activity_template_id",
+                flat=True,
+            )
+        )
+
+        self.assertEqual(len(task_activity_ids), 2)
+        self.assertEqual(len(set(task_activity_ids)), 2)
+
+    def test_create_journey_calculates_task_due_dates(self):
+        from datetime import timedelta
+        from django.utils import timezone
+        from employees.models import OnboardingActivityTemplate
+
+        activity_without_deadline = OnboardingActivityTemplate.objects.create(
+            phase=self.phase,
+            name="Optional orientation",
+            order=2,
+            is_required=False,
+            default_due_days=None,
+        )
+
+        today = timezone.localdate()
+
+        OnboardingService.publish_template(self.template.pk)
+
+        journey = OnboardingService.create_journey(
+            employee_id=self.employee.pk,
+            template_id=self.template.pk,
+            created_by=self.admin,
+        )
+
+        task_with_deadline = journey.tasks.get(
+            activity_template=self.activity,
+        )
+        task_without_deadline = journey.tasks.get(
+            activity_template=activity_without_deadline,
+        )
+
+        self.assertEqual(
+            task_with_deadline.due_date,
+            today + timedelta(days=self.activity.default_due_days),
+        )
+        self.assertIsNone(task_without_deadline.due_date)
+
+    def test_create_journey_orders_tasks_by_phase_and_activity(self):
+        from employees.models import (
+            OnboardingActivityTemplate,
+            OnboardingPhase,
+        )
+
+        second_phase = OnboardingPhase.objects.create(
+            template=self.template,
+            name="Second day",
+            order=2,
+        )
+
+        later_activity = OnboardingActivityTemplate.objects.create(
+            phase=second_phase,
+            name="Meet the team",
+            order=1,
+            is_required=True,
+        )
+
+        earlier_activity = OnboardingActivityTemplate.objects.create(
+            phase=self.phase,
+            name="Complete HR paperwork - second",
+            order=2,
+            is_required=True,
+        )
+
+        OnboardingService.publish_template(self.template.pk)
+
+        journey = OnboardingService.create_journey(
+            employee_id=self.employee.pk,
+            template_id=self.template.pk,
+            created_by=self.admin,
+        )
+
+        task_activity_ids = list(
+            journey.tasks.order_by(
+                "activity_template__phase__order",
+                "activity_template__order",
+            ).values_list(
+                "activity_template_id",
+                flat=True,
+            )
+        )
+
+        self.assertEqual(
+            task_activity_ids,
+            [
+                self.activity.pk,
+                earlier_activity.pk,
+                later_activity.pk,
+            ],
+        )
+
+    def test_cannot_create_journey_with_inactive_employee(self):
+        self.employee.user.is_active = False
+        self.employee.user.save(update_fields=["is_active"])
+        OnboardingService.publish_template(self.template.pk)
+
+        with self.assertRaises(ValidationError):
+            OnboardingService.create_journey(
+                employee_id=self.employee.pk,
+                template_id=self.template.pk,
+                created_by=self.admin,
+            )
+
+
+    def test_cannot_modify_activity_of_published_template(self):
+        OnboardingService.publish_template(self.template.pk)
+
+        with self.assertRaises(ValidationError):
+            self.activity.delete()
+
+        self.activity.refresh_from_db()
+        self.assertEqual(self.activity.phase, self.phase)
+
+    def test_cannot_create_journey_with_inactive_creator_does_not_create_journey(self):
+        from employees.models import OnboardingJourney
+
+        self.admin.is_active = False
+        self.admin.save(update_fields=["is_active"])
+        OnboardingService.publish_template(self.template.pk)
+
+        with self.assertRaises(ValidationError):
+            OnboardingService.create_journey(
+                employee_id=self.employee.pk,
+                template_id=self.template.pk,
+                created_by=self.admin,
+            )
+
+        self.assertFalse(
+            OnboardingJourney.objects.filter(
+                employee=self.employee,
+                template=self.template,
+            ).exists()
+        )
+
+    def test_created_journey_starts_with_pending_status(self):
+        from employees.models import OnboardingJourney
+
+        OnboardingService.publish_template(self.template.pk)
+
+        journey = OnboardingService.create_journey(
+            employee_id=self.employee.pk,
+            template_id=self.template.pk,
+            created_by=self.admin,
+        )
+
+        self.assertEqual(
+            journey.status,
+            OnboardingJourney.Status.PENDING,
+        )
+
+    def test_created_tasks_reference_their_activity_templates(self):
+        OnboardingService.publish_template(self.template.pk)
+
+        journey = OnboardingService.create_journey(
+            employee_id=self.employee.pk,
+            template_id=self.template.pk,
+            created_by=self.admin,
+        )
+
+        task = journey.tasks.get()
+
+        self.assertEqual(task.activity_template, self.activity)
+        self.assertEqual(task.title, self.activity.name)
+        self.assertEqual(task.description, self.activity.description)
+
+    def test_create_journey_preserves_creator(self):
+        OnboardingService.publish_template(self.template.pk)
+
+        journey = OnboardingService.create_journey(
+            employee_id=self.employee.pk,
+            template_id=self.template.pk,
+            created_by=self.admin,
+        )
+
+        self.assertEqual(journey.created_by, self.admin)
+
+    def test_create_journey_without_target_completion_date(self):
+        OnboardingService.publish_template(self.template.pk)
+
+        journey = OnboardingService.create_journey(
+            employee_id=self.employee.pk,
+            template_id=self.template.pk,
+            created_by=self.admin,
+        )
+
+        self.assertIsNone(journey.target_completion_date)
+
+    def test_created_tasks_preserve_activity_titles(self):
+        OnboardingService.publish_template(self.template.pk)
+
+        journey = OnboardingService.create_journey(
+            employee_id=self.employee.pk,
+            template_id=self.template.pk,
+            created_by=self.admin,
+        )
+
+        task = journey.tasks.get()
+        self.assertEqual(task.title, self.activity.name)
+
+    def test_created_tasks_preserve_activity_descriptions(self):
+        OnboardingService.publish_template(self.template.pk)
+
+        journey = OnboardingService.create_journey(
+            employee_id=self.employee.pk,
+            template_id=self.template.pk,
+            created_by=self.admin,
+        )
+
+        task = journey.tasks.get()
+        self.assertEqual(task.description, self.activity.description)
+
+    def test_created_tasks_reference_correct_activity_template(self):
+        OnboardingService.publish_template(self.template.pk)
+
+        journey = OnboardingService.create_journey(
+            employee_id=self.employee.pk,
+            template_id=self.template.pk,
+            created_by=self.admin,
+        )
+
+        task = journey.tasks.get()
+        self.assertEqual(task.activity_template_id, self.activity.pk)
+
+    def test_create_journey_preserves_creator(self):
+        OnboardingService.publish_template(self.template.pk)
+
+        journey = OnboardingService.create_journey(
+            employee_id=self.employee.pk,
+            template_id=self.template.pk,
+            created_by=self.admin,
+        )
+
+        self.assertEqual(journey.created_by, self.admin)
+
+    def test_created_journey_starts_with_pending_status(self):
+        from employees.models import OnboardingJourney
+
+        OnboardingService.publish_template(self.template.pk)
+
+        journey = OnboardingService.create_journey(
+            employee_id=self.employee.pk,
+            template_id=self.template.pk,
+            created_by=self.admin,
+        )
+
+        self.assertEqual(
+            journey.status,
+            OnboardingJourney.Status.PENDING,
+        )
+
+class TaskAssignmentServiceTests(TestCase):
+    """Tests for onboarding task assignment business logic."""
+
+    def setUp(self):
+        from datetime import date
+        from django.contrib.auth import get_user_model
+        from employees.models import (
+            EmployeeProfile,
+            OnboardingActivityTemplate,
+            OnboardingPhase,
+            OnboardingTemplate,
+            Department,
+            Position,
+        )
+        from employees.services.onboarding import OnboardingService
+
+        User = get_user_model()
+
+        self.admin = User.objects.create_user(
+            email="assignment-admin@example.com",
+            name="Assignment Admin",
+            password="TestPassword123!",
+            role="HR_ADMIN",
+            is_active=True,
+        )
+
+        self.employee_user = User.objects.create_user(
+            email="assignment-employee@example.com",
+            name="Assignment Employee",
+            password="TestPassword123!",
+            is_active=True,
+        )
+
+        self.assignee = User.objects.create_user(
+            email="assignment-assignee@example.com",
+            name="Assignment Assignee",
+            password="TestPassword123!",
+            is_active=True,
+        )
+        department = Department.objects.create(
+            name="Assignment Engineering",
+            code="ASSIGN",
+        )
+
+        position = Position.objects.create(
+            title="Assignment Specialist",
+            department=department,
+        )
+        EmployeeProfile.objects.create(
+            user=self.assignee,
+            employee_id="ASSIGN-001",
+            department=department,
+            position=position,
+            hire_date=date.today(),
+        )
+        employee = EmployeeProfile.objects.create(
+            user=self.employee_user,
+            employee_id="ASSIGN-002",
+            department=department,
+            position=position,
+            hire_date=date.today(),
+        )
+
+        template = OnboardingTemplate.objects.create(
+            name="Assignment test template",
+            description="Template for assignment tests",
+            version=1,
+            created_by=self.admin,
+        )
+
+        phase = OnboardingPhase.objects.create(
+            template=template,
+            name="First day",
+            description="First-day activities",
+            order=1,
+        )
+
+        OnboardingActivityTemplate.objects.create(
+            phase=phase,
+            name="Complete HR paperwork",
+            description="Complete required HR forms",
+            order=1,
+            is_required=True,
+            default_due_days=3,
+        )
+
+        OnboardingService.publish_template(template.pk)
+
+        journey = OnboardingService.create_journey(
+            employee_id=employee.pk,
+            template_id=template.pk,
+            created_by=self.admin,
+        )
+
+        self.task = journey.tasks.get()
+
+    def test_assign_task_to_active_user(self):
+        from employees.services.task_assignment import TaskAssignmentService
+
+        assigned_task = TaskAssignmentService.assign_task(
+            task_id=self.task.pk,
+            assigned_to_id=self.assignee.pk,
+            actor=self.admin,
+        )
+
+        self.assertEqual(assigned_task.assigned_to_id, self.assignee.pk)
+
+        self.task.refresh_from_db()
+        self.assertEqual(self.task.assigned_to_id, self.assignee.pk)
+
+    def test_cannot_assign_task_to_nonexistent_user(self):
+        from uuid import uuid4
+        from django.core.exceptions import ValidationError
+        from employees.services.task_assignment import TaskAssignmentService
+
+        with self.assertRaises(ValidationError):
+            TaskAssignmentService.assign_task(
+                task_id=self.task.pk,
+                assigned_to_id=uuid4(),
+                actor=self.admin,
+            )
+
+        self.task.refresh_from_db()
+        self.assertIsNone(self.task.assigned_to_id)
+
+    def test_cannot_assign_task_to_inactive_user(self):
+        from django.core.exceptions import ValidationError
+        from employees.services.task_assignment import TaskAssignmentService
+
+        self.assignee.is_active = False
+        self.assignee.save(update_fields=["is_active"])
+
+        with self.assertRaises(ValidationError):
+            TaskAssignmentService.assign_task(
+                task_id=self.task.pk,
+                assigned_to_id=self.assignee.pk,
+                actor=self.admin,
+            )
+
+        self.task.refresh_from_db()
+        self.assertIsNone(self.task.assigned_to_id)
+
+    def test_cannot_assign_nonexistent_task(self):
+        from uuid import uuid4
+        from django.core.exceptions import ValidationError
+        from employees.services.task_assignment import TaskAssignmentService
+
+        with self.assertRaises(ValidationError):
+            TaskAssignmentService.assign_task(
+                task_id=uuid4(),
+                assigned_to_id=self.assignee.pk,
+                actor=self.admin,
+            )
+
+    def test_cannot_assign_completed_task(self):
+        from django.core.exceptions import ValidationError
+        from employees.models import OnboardingTask
+        from employees.services.task_assignment import TaskAssignmentService
+
+        self.task.status = OnboardingTask.Status.COMPLETED
+        self.task.save(update_fields=["status", "updated_at"])
+
+        with self.assertRaises(ValidationError):
+            TaskAssignmentService.assign_task(
+                task_id=self.task.pk,
+                assigned_to_id=self.assignee.pk,
+                actor=self.admin,
+            )
+
+    def test_cannot_assign_cancelled_task(self):
+        from django.core.exceptions import ValidationError
+        from employees.models import OnboardingTask
+        from employees.services.task_assignment import TaskAssignmentService
+
+        self.task.status = OnboardingTask.Status.CANCELLED
+        self.task.save(update_fields=["status", "updated_at"])
+
+        with self.assertRaises(ValidationError):
+            TaskAssignmentService.assign_task(
+                task_id=self.task.pk,
+                assigned_to_id=self.assignee.pk,
+                actor=self.admin,
+            )
+
+    def test_cannot_assign_task_without_assignee(self):
+        from django.core.exceptions import ValidationError
+        from employees.services.task_assignment import TaskAssignmentService
+
+        with self.assertRaises(ValidationError):
+            TaskAssignmentService.assign_task(
+                task_id=self.task.pk,
+                assigned_to_id=None,
+                actor=self.admin,
+            )
+
+    def test_cannot_assign_task_to_user_without_employee_profile(self):
+        from django.core.exceptions import ValidationError
+        from employees.services.task_assignment import TaskAssignmentService
+
+        # The admin account is active but has no EmployeeProfile.
+        with self.assertRaises(ValidationError):
+            TaskAssignmentService.assign_task(
+                task_id=self.task.pk,
+                assigned_to_id=self.admin.pk,
+                actor=self.admin,
+            )
+
+        self.task.refresh_from_db()
+        self.assertIsNone(self.task.assigned_to_id)
+
+    def test_reassignment_records_previous_and_new_assignee(self):
+        from employees.models import WorkflowExecutionLog
+        from employees.services.task_assignment import TaskAssignmentService
+
+        # First assignment.
+        TaskAssignmentService.assign_task(
+            task_id=self.task.pk,
+            assigned_to_id=self.assignee.pk,
+            actor=self.admin,
+        )
+
+        new_assignee = type(self.assignee).objects.create_user(
+            email="assignment-new-assignee@example.com",
+            name="New Assignment Assignee",
+            password="TestPassword123!",
+            is_active=True,
+        )
+
+        from datetime import date
+        from employees.models import EmployeeProfile, Department, Position
+
+        department = Department.objects.get(code="ASSIGN")
+        position = Position.objects.get(
+            title="Assignment Specialist",
+            department=department,
+        )
+        EmployeeProfile.objects.create(
+            user=new_assignee,
+            employee_id="ASSIGN-003",
+            department=department,
+            position=position,
+            hire_date=date.today(),
+        )
+
+        TaskAssignmentService.assign_task(
+            task_id=self.task.pk,
+            assigned_to_id=new_assignee.pk,
+            actor=self.admin,
+        )
+
+        self.task.refresh_from_db()
+        self.assertEqual(self.task.assigned_to_id, new_assignee.pk)
+
+        log = WorkflowExecutionLog.objects.get(
+            task=self.task,
+            event_type="TASK_REASSIGNED",
+        )
+        self.assertEqual(log.actor_id, self.admin.pk)
+        self.assertEqual(
+            log.details["previous_assignee_id"],
+            str(self.assignee.pk),
+        )
+        self.assertEqual(
+            log.details["new_assignee_id"],
+            str(new_assignee.pk),
+        )
+
+    def test_employee_cannot_assign_task(self):
+        from django.core.exceptions import ValidationError
+        from employees.services.task_assignment import TaskAssignmentService
+
+        with self.assertRaises(ValidationError):
+            TaskAssignmentService.assign_task(
+                task_id=self.task.pk,
+                assigned_to_id=self.assignee.pk,
+                actor=self.employee_user,
+            )
+
+        self.task.refresh_from_db()
+        self.assertIsNone(self.task.assigned_to_id)
+
+    def test_assigning_same_user_does_not_create_reassignment_log(self):
+        from employees.models import WorkflowExecutionLog
+        from employees.services.task_assignment import TaskAssignmentService
+
+        TaskAssignmentService.assign_task(
+            task_id=self.task.pk,
+            assigned_to_id=self.assignee.pk,
+            actor=self.admin,
+        )
+
+        logs_before = WorkflowExecutionLog.objects.filter(
+            task=self.task,
+        ).count()
+
+        TaskAssignmentService.assign_task(
+            task_id=self.task.pk,
+            assigned_to_id=self.assignee.pk,
+            actor=self.admin,
+        )
+
+        logs_after = WorkflowExecutionLog.objects.filter(
+            task=self.task,
+        ).count()
+
+        self.assertEqual(logs_after, logs_before)
+
+class WorkflowEngineTests(TestCase):
+    """Tests for onboarding workflow task transitions."""
+
+    def setUp(self):
+        from datetime import date
+
+        from django.contrib.auth import get_user_model
+
+        from employees.models import (
+            EmployeeProfile,
+            Department,
+            Position,
+            OnboardingActivityTemplate,
+            OnboardingPhase,
+            OnboardingTemplate,
+            OnboardingJourney,
+            OnboardingTask,
+        )
+        from employees.services.onboarding import OnboardingService
+
+        User = get_user_model()
+
+        self.admin = User.objects.create_user(
+            email="workflow-admin@example.com",
+            name="Workflow Admin",
+            password="TestPassword123!",
+            role="HR_ADMIN",
+            is_active=True,
+        )
+
+        self.employee_user = User.objects.create_user(
+            email="workflow-employee@example.com",
+            name="Workflow Employee",
+            password="TestPassword123!",
+            role="EMPLOYEE",
+            is_active=True,
+        )
+
+        self.department = Department.objects.create(
+            name="Workflow Department",
+            code="WFLOW",
+        )
+
+        self.position = Position.objects.create(
+            title="Workflow Specialist",
+            department=self.department,
+        )
+
+        self.employee = EmployeeProfile.objects.create(
+            user=self.employee_user,
+            employee_id="WFLOW-001",
+            department=self.department,
+            position=self.position,
+            hire_date=date.today(),
+        )
+
+        self.template = OnboardingTemplate.objects.create(
+            name="Workflow test template",
+            description="Template for workflow engine tests",
+            version=1,
+            created_by=self.admin,
+        )
+
+        self.phase = OnboardingPhase.objects.create(
+            template=self.template,
+            name="Workflow phase",
+            description="Phase for workflow tests",
+            order=1,
+        )
+
+        self.activity = OnboardingActivityTemplate.objects.create(
+            phase=self.phase,
+            name="Workflow task",
+            description="Task used to test transitions",
+            order=1,
+            is_required=True,
+            default_due_days=3,
+        )
+
+        OnboardingService.publish_template(self.template.pk)
+
+        self.journey = OnboardingService.create_journey(
+            employee_id=self.employee.pk,
+            template_id=self.template.pk,
+            created_by=self.admin,
+        )
+
+        self.task = self.journey.tasks.get()
+
+    def test_pending_task_can_start(self):
+        from employees.models import OnboardingTask
+        from employees.services.workflow_engine import WorkflowEngine
+
+        task = WorkflowEngine.transition_task(
+            task_id=self.task.pk,
+            target_status=OnboardingTask.Status.IN_PROGRESS,
+            actor=self.admin,
+        )
+
+        self.assertEqual(task.status, OnboardingTask.Status.IN_PROGRESS)
+        self.assertIsNotNone(task.started_at)
+
+    def test_in_progress_task_can_be_completed(self):
+        from employees.models import OnboardingTask
+        from employees.services.workflow_engine import WorkflowEngine
+
+        WorkflowEngine.transition_task(
+            task_id=self.task.pk,
+            target_status=OnboardingTask.Status.IN_PROGRESS,
+            actor=self.admin,
+        )
+
+        task = WorkflowEngine.transition_task(
+            task_id=self.task.pk,
+            target_status=OnboardingTask.Status.COMPLETED,
+            actor=self.admin,
+        )
+
+        self.assertEqual(task.status, OnboardingTask.Status.COMPLETED)
+        self.assertIsNotNone(task.completed_at)
+
+    def test_cannot_complete_pending_task_directly(self):
+        from django.core.exceptions import ValidationError
+        from employees.models import OnboardingTask
+        from employees.services.workflow_engine import WorkflowEngine
+
+        with self.assertRaises(ValidationError):
+            WorkflowEngine.transition_task(
+                task_id=self.task.pk,
+                target_status=OnboardingTask.Status.COMPLETED,
+                actor=self.admin,
+            )
+
+        self.task.refresh_from_db()
+        self.assertEqual(
+            self.task.status,
+            OnboardingTask.Status.PENDING,
+        )
+
+    def test_employee_cannot_transition_task(self):
+        from django.core.exceptions import ValidationError
+        from employees.models import OnboardingTask
+        from employees.services.workflow_engine import WorkflowEngine
+
+        with self.assertRaises(ValidationError):
+            WorkflowEngine.transition_task(
+                task_id=self.task.pk,
+                target_status=OnboardingTask.Status.IN_PROGRESS,
+                actor=self.employee_user,
+            )
+
+        self.task.refresh_from_db()
+        self.assertEqual(
+            self.task.status,
+            OnboardingTask.Status.PENDING,
+        )
+
+    def test_cannot_start_task_with_incomplete_prerequisite(self):
+        from django.core.exceptions import ValidationError
+        from employees.models import (
+            OnboardingActivityTemplate,
+            OnboardingPhase,
+            OnboardingTemplate,
+            OnboardingTask,
+            TaskDependency,
+        )
+        from employees.services.onboarding import OnboardingService
+        from employees.services.workflow_engine import WorkflowEngine
+
+        # Create a separate template for the prerequisite task.
+        prerequisite_template = OnboardingTemplate.objects.create(
+            name="Prerequisite workflow template",
+            description="Template for prerequisite test",
+            version=1,
+            created_by=self.admin,
+        )
+
+        prerequisite_phase = OnboardingPhase.objects.create(
+            template=prerequisite_template,
+            name="Prerequisite phase",
+            description="Phase for prerequisite test",
+            order=1,
+        )
+
+        prerequisite_activity = OnboardingActivityTemplate.objects.create(
+            phase=prerequisite_phase,
+            name="Prerequisite task",
+            description="Must be completed first",
+            order=1,
+            is_required=True,
+            default_due_days=3,
+        )
+
+        OnboardingService.publish_template(prerequisite_template.pk)
+
+        prerequisite_journey = OnboardingService.create_journey(
+            employee_id=self.employee.pk,
+            template_id=prerequisite_template.pk,
+            created_by=self.admin,
+        )
+
+        prerequisite_task = prerequisite_journey.tasks.get()
+
+        # Link the prerequisite task to the task being tested.
+        TaskDependency.objects.create(
+            prerequisite_task=prerequisite_task,
+            dependent_task=self.task,
+        )
+
+        with self.assertRaises(ValidationError):
+            WorkflowEngine.transition_task(
+                task_id=self.task.pk,
+                target_status=OnboardingTask.Status.IN_PROGRESS,
+                actor=self.admin,
+            )
+
+        self.task.refresh_from_db()
+        self.assertEqual(
+            self.task.status,
+            OnboardingTask.Status.PENDING,
+        )
+
+    def test_successful_transition_creates_audit_log(self):
+        from employees.models import (
+            OnboardingTask,
+            WorkflowExecutionLog,
+        )
+        from employees.services.workflow_engine import WorkflowEngine
+
+        WorkflowEngine.transition_task(
+            task_id=self.task.pk,
+            target_status=OnboardingTask.Status.IN_PROGRESS,
+            actor=self.admin,
+        )
+
+        log = WorkflowExecutionLog.objects.get(
+            task=self.task,
+            event_type="TASK_STATUS_CHANGED",
+        )
+
+        self.assertEqual(log.actor_id, self.admin.pk)
+        self.assertEqual(
+            log.outcome,
+            WorkflowExecutionLog.Outcome.SUCCESS,
+        )
+        self.assertEqual(
+            log.details["previous_status"],
+            OnboardingTask.Status.PENDING,
+        )
+        self.assertEqual(
+            log.details["new_status"],
+            OnboardingTask.Status.IN_PROGRESS,
+        )
+
+    def test_completed_task_cannot_transition_again(self):
+        from django.core.exceptions import ValidationError
+        from employees.models import OnboardingTask
+        from employees.services.workflow_engine import WorkflowEngine
+
+        WorkflowEngine.transition_task(
+            task_id=self.task.pk,
+            target_status=OnboardingTask.Status.IN_PROGRESS,
+            actor=self.admin,
+        )
+
+        WorkflowEngine.transition_task(
+            task_id=self.task.pk,
+            target_status=OnboardingTask.Status.COMPLETED,
+            actor=self.admin,
+        )
+
+        with self.assertRaises(ValidationError):
+            WorkflowEngine.transition_task(
+                task_id=self.task.pk,
+                target_status=OnboardingTask.Status.IN_PROGRESS,
+                actor=self.admin,
+            )
+
+        self.task.refresh_from_db()
+        self.assertEqual(
+            self.task.status,
+            OnboardingTask.Status.COMPLETED,
+        )
+
+    def test_inactive_admin_cannot_transition_task(self):
+        from django.core.exceptions import ValidationError
+        from employees.models import OnboardingTask
+        from employees.services.workflow_engine import WorkflowEngine
+
+        self.admin.is_active = False
+        self.admin.save(update_fields=["is_active"])
+
+        with self.assertRaises(ValidationError):
+            WorkflowEngine.transition_task(
+                task_id=self.task.pk,
+                target_status=OnboardingTask.Status.IN_PROGRESS,
+                actor=self.admin,
+            )
+
+        self.task.refresh_from_db()
+        self.assertEqual(
+            self.task.status,
+            OnboardingTask.Status.PENDING,
+        )
+
+    def test_transition_of_nonexistent_task_fails(self):
+        from django.core.exceptions import ValidationError
+        from uuid import uuid4
+        from employees.models import OnboardingTask
+        from employees.services.workflow_engine import WorkflowEngine
+
+        with self.assertRaises(ValidationError):
+            WorkflowEngine.transition_task(
+                task_id=uuid4(),
+                target_status=OnboardingTask.Status.IN_PROGRESS,
+                actor=self.admin,
+            )
+
+class OnboardingNotificationServiceTests(TestCase):
+    """Tests for onboarding task email notifications."""
+
+    def setUp(self):
+        from datetime import date
+
+        from django.contrib.auth import get_user_model
+        from employees.models import (
+            Department,
+            EmployeeProfile,
+            OnboardingActivityTemplate,
+            OnboardingPhase,
+            OnboardingTemplate,
+            Position,
+        )
+        from employees.services.onboarding import OnboardingService
+
+        User = get_user_model()
+
+        self.admin = User.objects.create_user(
+            email="notification-admin@example.com",
+            name="Notification Admin",
+            password="TestPassword123!",
+            role="HR_ADMIN",
+            is_active=True,
+        )
+
+        self.employee_user = User.objects.create_user(
+            email="notification-employee@example.com",
+            name="Notification Employee",
+            password="TestPassword123!",
+            role="EMPLOYEE",
+            is_active=True,
+        )
+
+        department = Department.objects.create(
+            name="Notification Department",
+            code="NOTIF",
+        )
+        position = Position.objects.create(
+            title="Notification Specialist",
+            department=department,
+        )
+        employee = EmployeeProfile.objects.create(
+            user=self.employee_user,
+            employee_id="NOTIF-001",
+            department=department,
+            position=position,
+            hire_date=date.today(),
+        )
+
+        template = OnboardingTemplate.objects.create(
+            name="Notification test template",
+            description="Template for notification tests",
+            version=1,
+            created_by=self.admin,
+        )
+        phase = OnboardingPhase.objects.create(
+            template=template,
+            name="Notification phase",
+            description="Phase for notification tests",
+            order=1,
+        )
+        OnboardingActivityTemplate.objects.create(
+            phase=phase,
+            name="Confidential task title",
+            description="Confidential task description",
+            order=1,
+            is_required=True,
+            default_due_days=3,
+        )
+
+        OnboardingService.publish_template(template.pk)
+        self.journey = OnboardingService.create_journey(
+            employee_id=employee.pk,
+            template_id=template.pk,
+            created_by=self.admin,
+        )
+        self.task = self.journey.tasks.get()
+
+    def test_task_assignment_notification_uses_assignee(self):
+        from unittest.mock import patch
+
+        from employees.services.onboarding_notifications import (
+            OnboardingNotificationService,
+        )
+
+        self.task.assigned_to = self.employee_user
+        self.task.save(update_fields=["assigned_to"])
+
+        with patch(
+            "employees.services.onboarding_notifications.send_mail"
+        ) as mock_send_mail:
+            with self.captureOnCommitCallbacks(execute=True) as callbacks:
+                result = OnboardingNotificationService.notify_task_assigned(
+                    task_id=self.task.pk,
+                )
+
+            self.assertTrue(result)
+            self.assertEqual(len(callbacks), 1)
+            mock_send_mail.assert_called_once()
+
+        kwargs = mock_send_mail.call_args.kwargs
+        self.assertEqual(
+            kwargs["recipient_list"],
+            [self.employee_user.email],
+        )
+        self.assertNotIn("Confidential task title", kwargs["message"])
+        self.assertNotIn(
+            "Confidential task description",
+            kwargs["message"],
+        )
+        self.assertNotIn(
+            self.employee_user.email,
+            kwargs["message"],
+        )
+
+    def test_unassigned_task_does_not_send_notification(self):
+        from unittest.mock import patch
+
+        from employees.services.onboarding_notifications import (
+            OnboardingNotificationService,
+        )
+
+        with patch(
+            "employees.services.onboarding_notifications.send_mail"
+        ) as mock_send_mail:
+            result = OnboardingNotificationService.notify_task_assigned(
+                task_id=self.task.pk,
+            )
+
+        self.assertFalse(result)
+        mock_send_mail.assert_not_called()
+
+    def test_incomplete_task_does_not_send_completion_notification(self):
+        from unittest.mock import patch
+
+        from employees.services.onboarding_notifications import (
+            OnboardingNotificationService,
+        )
+
+        with patch(
+            "employees.services.onboarding_notifications.send_mail"
+        ) as mock_send_mail:
+            result = OnboardingNotificationService.notify_task_completed(
+                task_id=self.task.pk,
+            )
+
+        self.assertFalse(result)
+        mock_send_mail.assert_not_called()
+
+    def test_email_failure_is_logged_without_exposing_email(self):
+        from unittest.mock import patch
+
+        from employees.models import WorkflowExecutionLog
+        from employees.services.onboarding_notifications import (
+            OnboardingNotificationService,
+        )
+
+        self.task.assigned_to = self.employee_user
+        self.task.save(update_fields=["assigned_to"])
+
+        with patch(
+            "employees.services.onboarding_notifications.send_mail",
+            side_effect=RuntimeError("Simulated email failure"),
+        ):
+            with self.captureOnCommitCallbacks(execute=True):
+                result = OnboardingNotificationService.notify_task_assigned(
+                    task_id=self.task.pk,
+                )
+
+        self.assertTrue(result)
+
+        log = WorkflowExecutionLog.objects.get(
+            task=self.task,
+            event_type="NOTIFICATION_FAILED",
+        )
+        self.assertEqual(
+            log.outcome,
+            WorkflowExecutionLog.Outcome.FAILURE,
+        )
+        self.assertEqual(
+            log.details,
+            {"notification_type": "TASK_ASSIGNED"},
+        )
+        self.assertNotIn(
+            self.employee_user.email,
+            str(log.details),
+        )
+
+    def test_assignment_service_triggers_assignee_notification(self):
+        from unittest.mock import patch
+
+        from employees.services.task_assignment import TaskAssignmentService
+
+        with patch(
+            "employees.services.onboarding_notifications.send_mail"
+        ) as mock_send_mail:
+            with self.captureOnCommitCallbacks(execute=True):
+                TaskAssignmentService.assign_task(
+                    task_id=self.task.pk,
+                    assigned_to_id=self.employee_user.pk,
+                    actor=self.admin,
+                )
+
+        mock_send_mail.assert_called_once()
+        self.assertEqual(
+            mock_send_mail.call_args.kwargs["recipient_list"],
+            [self.employee_user.email],
+        )
+
+    def test_workflow_engine_triggers_completion_notification(self):
+        from unittest.mock import patch
+
+        from employees.models import OnboardingTask
+        from employees.services.workflow_engine import WorkflowEngine
+
+        with patch(
+            "employees.services.onboarding_notifications.send_mail"
+        ) as mock_send_mail:
+            with self.captureOnCommitCallbacks(execute=True):
+                WorkflowEngine.transition_task(
+                    task_id=self.task.pk,
+                    target_status=OnboardingTask.Status.IN_PROGRESS,
+                    actor=self.admin,
+                )
+                WorkflowEngine.transition_task(
+                    task_id=self.task.pk,
+                    target_status=OnboardingTask.Status.COMPLETED,
+                    actor=self.admin,
+                )
+
+        mock_send_mail.assert_called_once()
+        self.assertEqual(
+            mock_send_mail.call_args.kwargs["recipient_list"],
+            [self.admin.email],
+        )
+
+class OnboardingPermissionServiceTests(TestCase):
+    """Tests for centralized onboarding authorization rules."""
+
+    def setUp(self):
+        from datetime import date
+
+        from django.contrib.auth import get_user_model
+        from employees.models import (
+            Department,
+            EmployeeProfile,
+            OnboardingActivityTemplate,
+            OnboardingPhase,
+            OnboardingTemplate,
+            Position,
+        )
+        from employees.services.onboarding import OnboardingService
+
+        User = get_user_model()
+
+        self.admin = User.objects.create_user(
+            email="permission-admin@example.com",
+            name="Permission Admin",
+            password="TestPassword123!",
+            role="HR_ADMIN",
+            is_active=True,
+        )
+        self.manager = User.objects.create_user(
+            email="permission-manager@example.com",
+            name="Permission Manager",
+            password="TestPassword123!",
+            role="HR_MANAGER",
+            is_active=True,
+        )
+        self.employee_user = User.objects.create_user(
+            email="permission-employee@example.com",
+            name="Permission Employee",
+            password="TestPassword123!",
+            role="EMPLOYEE",
+            is_active=True,
+        )
+        self.other_employee_user = User.objects.create_user(
+            email="permission-other@example.com",
+            name="Other Employee",
+            password="TestPassword123!",
+            role="EMPLOYEE",
+            is_active=True,
+        )
+
+        department = Department.objects.create(
+            name="Permission Department",
+            code="PERM",
+        )
+        position = Position.objects.create(
+            title="Permission Specialist",
+            department=department,
+        )
+
+        self.employee = EmployeeProfile.objects.create(
+            user=self.employee_user,
+            employee_id="PERM-001",
+            department=department,
+            position=position,
+            hire_date=date.today(),
+        )
+        self.other_employee = EmployeeProfile.objects.create(
+            user=self.other_employee_user,
+            employee_id="PERM-002",
+            department=department,
+            position=position,
+            hire_date=date.today(),
+        )
+
+        template = OnboardingTemplate.objects.create(
+            name="Permission test template",
+            description="Template for permission tests",
+            version=1,
+            created_by=self.admin,
+        )
+        phase = OnboardingPhase.objects.create(
+            template=template,
+            name="First day",
+            description="Permission test phase",
+            order=1,
+        )
+        OnboardingActivityTemplate.objects.create(
+            phase=phase,
+            name="Complete paperwork",
+            description="Permission test activity",
+            order=1,
+            is_required=True,
+            default_due_days=3,
+        )
+
+        OnboardingService.publish_template(template.pk)
+
+        self.journey = OnboardingService.create_journey(
+            employee_id=self.employee.pk,
+            template_id=template.pk,
+            created_by=self.admin,
+        )
+        self.other_journey = OnboardingService.create_journey(
+            employee_id=self.other_employee.pk,
+            template_id=template.pk,
+            created_by=self.admin,
+        )
+        self.task = self.journey.tasks.get()
+        self.other_task = self.other_journey.tasks.get()
+
+    def test_hr_roles_can_manage_templates(self):
+        from employees.services.onboarding_permissions import (
+            OnboardingPermissionService as Permissions,
+        )
+
+        self.assertTrue(Permissions.can_manage_templates(self.admin))
+
+        super_admin = type(self.admin).objects.create_user(
+            email="permission-superadmin@example.com",
+            name="Permission Super Admin",
+            password="TestPassword123!",
+            role="SUPER_ADMIN",
+        )
+        self.assertTrue(Permissions.can_manage_templates(super_admin))
+        self.assertFalse(Permissions.can_manage_templates(self.manager))
+        self.assertFalse(
+            Permissions.can_manage_templates(self.employee_user)
+        )
+
+    def test_only_operational_roles_can_assign_and_transition_tasks(self):
+        from employees.services.onboarding_permissions import (
+            OnboardingPermissionService as Permissions,
+        )
+
+        for user in (self.admin, self.manager):
+            with self.subTest(role=user.role):
+                self.assertTrue(Permissions.can_assign_tasks(user))
+                self.assertTrue(Permissions.can_transition_tasks(user))
+
+        self.assertFalse(
+            Permissions.can_assign_tasks(self.employee_user)
+        )
+        self.assertFalse(
+            Permissions.can_transition_tasks(self.employee_user)
+        )
+
+    def test_employee_can_view_own_journey_but_not_another_journey(self):
+        from employees.services.onboarding_permissions import (
+            OnboardingPermissionService as Permissions,
+        )
+
+        self.assertTrue(
+            Permissions.can_view_journey(
+                self.employee_user,
+                self.journey,
+            )
+        )
+        self.assertFalse(
+            Permissions.can_view_journey(
+                self.employee_user,
+                self.other_journey,
+            )
+        )
+        self.assertTrue(
+            Permissions.can_view_journey(self.manager, self.other_journey)
+        )
+
+    def test_employee_can_view_own_task_but_not_another_employee_task(self):
+        from employees.services.onboarding_permissions import (
+            OnboardingPermissionService as Permissions,
+        )
+
+        self.assertTrue(
+            Permissions.can_view_task(self.employee_user, self.task)
+        )
+        self.assertFalse(
+            Permissions.can_view_task(self.employee_user, self.other_task)
+        )
+        self.assertTrue(
+            Permissions.can_view_task(self.manager, self.other_task)
+        )
+
+    def test_assigned_employee_can_view_task_outside_own_journey(self):
+        from employees.services.onboarding_permissions import (
+            OnboardingPermissionService as Permissions,
+        )
+
+        self.other_task.assigned_to = self.employee_user
+        self.other_task.save(update_fields=["assigned_to"])
+
+        self.assertTrue(
+            Permissions.can_view_task(self.employee_user, self.other_task)
+        )
+
+    def test_inactive_user_cannot_access_onboarding_permissions(self):
+        from employees.services.onboarding_permissions import (
+            OnboardingPermissionService as Permissions,
+        )
+
+        self.employee_user.is_active = False
+        self.employee_user.save(update_fields=["is_active"])
+
+        self.assertFalse(
+            Permissions.can_view_journey(self.employee_user, self.journey)
+        )
+        self.assertFalse(
+            Permissions.can_view_task(self.employee_user, self.task)
+        )
+        self.assertFalse(
+            Permissions.can_manage_templates(self.employee_user)
+        )
+        self.assertFalse(
+            Permissions.can_assign_tasks(self.employee_user)
+        )
+        self.assertFalse(
+            Permissions.can_transition_tasks(self.employee_user)
+        )
+
+    def test_missing_objects_are_denied(self):
+        from employees.services.onboarding_permissions import (
+            OnboardingPermissionService as Permissions,
+        )
+
+        self.assertFalse(Permissions.can_view_journey(self.admin, None))
+        self.assertFalse(Permissions.can_view_task(self.admin, None))
+
+    def test_anonymous_user_is_denied(self):
+        from django.contrib.auth.models import AnonymousUser
+
+        from employees.services.onboarding_permissions import (
+            OnboardingPermissionService as Permissions,
+        )
+
+        anonymous = AnonymousUser()
+
+        self.assertFalse(Permissions.can_view_journey(anonymous, self.journey))
+        self.assertFalse(Permissions.can_view_task(anonymous, self.task))
+        self.assertFalse(Permissions.can_manage_templates(anonymous))
+        self.assertFalse(Permissions.can_assign_tasks(anonymous))
+        self.assertFalse(Permissions.can_transition_tasks(anonymous))
+
+class OnboardingRBACAPITests(TestCase):
+    """Test role-based access control for onboarding APIs."""
+
+    def setUp(self):
+        from django.urls import reverse
+
+        from employees.services.onboarding import OnboardingService
+        from employees.models import (
+            OnboardingTemplate,
+            OnboardingPhase,
+            OnboardingActivityTemplate,
+        )
+
+        self.client = APIClient()
+        self.reverse = reverse
+
+        self.super_admin = User.objects.create_user(
+            email="onboarding-api-admin@example.com",
+            name="Onboarding API Admin",
+            password="StrongPassword123!",
+            role="SUPER_ADMIN",
+            is_staff=True,
+            is_superuser=True,
+        )
+        self.hr_admin = User.objects.create_user(
+            email="onboarding-api-hr@example.com",
+            name="Onboarding API HR Admin",
+            password="StrongPassword123!",
+            role="HR_ADMIN",
+        )
+        self.hr_manager = User.objects.create_user(
+            email="onboarding-api-manager@example.com",
+            name="Onboarding API HR Manager",
+            password="StrongPassword123!",
+            role="HR_MANAGER",
+        )
+        self.employee_user = User.objects.create_user(
+            email="onboarding-api-employee@example.com",
+            name="Onboarding API Employee",
+            password="StrongPassword123!",
+            role="EMPLOYEE",
+        )
+        self.other_employee_user = User.objects.create_user(
+            email="onboarding-api-other@example.com",
+            name="Onboarding API Other Employee",
+            password="StrongPassword123!",
+            role="EMPLOYEE",
+        )
+
+        self.employee = EmployeeProfile.objects.create(
+            user=self.employee_user,
+            employee_id="ONBAPI-002",
+            hire_date=date.today(),
+        )
+        self.other_employee = EmployeeProfile.objects.create(
+            user=self.other_employee_user,
+            employee_id="ONBAPI-001",
+            hire_date=date.today(),
+        )
+
+        template = OnboardingTemplate.objects.create(
+            name="Onboarding API test template",
+            description="Template used by API RBAC tests",
+            version=1,
+            created_by=self.hr_admin,
+        )
+        phase = OnboardingPhase.objects.create(
+            template=template,
+            name="First day",
+            description="First-day activities",
+            order=1,
+        )
+        OnboardingActivityTemplate.objects.create(
+            phase=phase,
+            name="Complete paperwork",
+            description="Complete the required paperwork",
+            order=1,
+            is_required=True,
+            default_due_days=3,
+        )
+
+        OnboardingService.publish_template(template.pk)
+
+        self.journey = OnboardingService.create_journey(
+            employee_id=self.employee.pk,
+            template_id=template.pk,
+            created_by=self.hr_admin,
+        )
+        self.other_journey = OnboardingService.create_journey(
+            employee_id=self.other_employee.pk,
+            template_id=template.pk,
+            created_by=self.hr_admin,
+        )
+
+        self.task = self.journey.tasks.get()
+        self.other_task = self.other_journey.tasks.get()
+
+        self.journeys_url = reverse("onboarding-journey-list")
+        self.tasks_url = reverse("onboarding-task-list")
+
+    def authenticate(self, user):
+        self.client.force_authenticate(user=user)
+
+    def test_hr_roles_can_list_all_journeys(self):
+        for user in (
+            self.super_admin,
+            self.hr_admin,
+            self.hr_manager,
+        ):
+            with self.subTest(role=user.role):
+                self.authenticate(user)
+                response = self.client.get(self.journeys_url)
+
+                self.assertEqual(response.status_code, status.HTTP_200_OK)
+                self.assertEqual(response.data["count"], 2)
+
+    def test_employee_only_sees_own_journey(self):
+        self.authenticate(self.employee_user)
+
+        response = self.client.get(self.journeys_url)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["count"], 1)
+        self.assertEqual(
+            str(response.data["results"][0]["id"]),
+            str(self.journey.pk),
+        )
+
+    def test_employee_cannot_retrieve_another_journey(self):
+        self.authenticate(self.employee_user)
+        url = self.reverse(
+            "onboarding-journey-detail",
+            kwargs={"pk": self.other_journey.pk},
+        )
+
+        response = self.client.get(url)
+
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_hr_roles_can_list_all_tasks(self):
+        for user in (
+            self.super_admin,
+            self.hr_admin,
+            self.hr_manager,
+        ):
+            with self.subTest(role=user.role):
+                self.authenticate(user)
+                response = self.client.get(self.tasks_url)
+
+                self.assertEqual(response.status_code, status.HTTP_200_OK)
+                self.assertEqual(response.data["count"], 2)
+
+    def test_employee_only_sees_tasks_from_own_journey(self):
+        self.authenticate(self.employee_user)
+
+        response = self.client.get(self.tasks_url)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["count"], 1)
+        self.assertEqual(
+            str(response.data["results"][0]["id"]),
+            str(self.task.pk),
+        )
+
+    def test_employee_cannot_retrieve_another_employees_task(self):
+        self.authenticate(self.employee_user)
+        url = self.reverse(
+            "onboarding-task-detail",
+            kwargs={"pk": self.other_task.pk},
+        )
+
+        response = self.client.get(url)
+
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_employee_cannot_assign_a_task(self):
+        self.authenticate(self.employee_user)
+        url = self.reverse(
+            "onboarding-task-assign",
+            kwargs={"pk": self.task.pk},
+        )
+
+        response = self.client.post(
+            url,
+            {"assigned_to_id": self.other_employee_user.pk},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_employee_cannot_transition_a_task(self):
+        self.authenticate(self.employee_user)
+        url = self.reverse(
+            "onboarding-task-transition",
+            kwargs={"pk": self.task.pk},
+        )
+
+        response = self.client.post(
+            url,
+            {"target_status": self.task.status},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_employee_cannot_create_a_journey_directly(self):
+        self.authenticate(self.employee_user)
+
+        response = self.client.post(
+            self.journeys_url,
+            {},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_employee_cannot_create_a_task_directly(self):
+        self.authenticate(self.employee_user)
+
+        response = self.client.post(
+            self.tasks_url,
+            {},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+class DocumentReviewServiceTests(TestCase):
+    """Security and lifecycle tests for DocumentReviewService."""
+
+    def setUp(self):
+        from employees.services.document_review import DocumentReviewService
+
+        self.service = DocumentReviewService
+
+        self.owner = User.objects.create_user(
+            email="review-owner@example.com",
+            name="Document Owner",
+            password="TestPass123!",
+        )
+
+        self.reviewer = User.objects.create_user(
+            email="review-manager@example.com",
+            name="HR Reviewer",
+            password="TestPass123!",
+            role="HR_MANAGER",
+        )
+
+        self.department = Department.objects.create(
+            name="Review Department",
+            code="REV",
+        )
+
+        self.position = Position.objects.create(
+            title="Review Employee",
+            department=self.department,
+        )
+
+        self.profile = EmployeeProfile.objects.create(
+            user=self.owner,
+            employee_id="REV-001",
+            department=self.department,
+            position=self.position,
+            hire_date=date(2026, 1, 15),
+        )
+
+        self.document = HRDocument.objects.create(
+            employee=self.profile,
+            title="Employment Contract",
+            document_type=HRDocument.DocumentType.EMPLOYMENT_CONTRACT,
+            original_filename="contract.pdf",
+            storage_key="hr-documents/review/contract.pdf",
+            mime_type="application/pdf",
+            size_bytes=1024,
+            uploaded_by=self.owner,
+            status=HRDocument.Status.PENDING_REVIEW,
+        )
+
+    def review(self, **kwargs):
+        defaults = {
+            "document_id": self.document.pk,
+            "actor": self.reviewer,
+            "decision": DocumentReview.Decision.APPROVED,
+        }
+        defaults.update(kwargs)
+        return self.service.review_document(**defaults)
+
+    def test_approval_verifies_document_and_records_reviewer(self):
+        review = self.review()
+
+        self.document.refresh_from_db()
+
+        self.assertEqual(
+            review.decision,
+            DocumentReview.Decision.APPROVED,
+        )
+        self.assertEqual(review.document, self.document)
+        self.assertEqual(review.reviewer, self.reviewer)
+        self.assertEqual(
+            self.document.status,
+            HRDocument.Status.VERIFIED,
+        )
+        self.assertEqual(self.document.verified_by, self.reviewer)
+        self.assertIsNotNone(self.document.verified_at)
+        self.assertEqual(
+            DocumentReview.objects.filter(document=self.document).count(),
+            1,
+        )
+
+    def test_rejection_requires_reason(self):
+        with self.assertRaises(ValidationError):
+            self.review(
+                decision=DocumentReview.Decision.REJECTED,
+                comment="   ",
+            )
+
+        self.document.refresh_from_db()
+
+        self.assertEqual(
+            self.document.status,
+            HRDocument.Status.PENDING_REVIEW,
+        )
+        self.assertFalse(
+            DocumentReview.objects.filter(document=self.document).exists()
+        )
+
+    def test_rejection_records_reason_and_updates_document(self):
+        reason = "The contract is incomplete."
+
+        review = self.review(
+            decision=DocumentReview.Decision.REJECTED,
+            comment=reason,
+        )
+
+        self.document.refresh_from_db()
+
+        self.assertEqual(review.comment, reason)
+        self.assertEqual(
+            self.document.status,
+            HRDocument.Status.REJECTED,
+        )
+        self.assertEqual(self.document.rejection_reason, reason)
+        self.assertIsNone(self.document.verified_by)
+        self.assertIsNone(self.document.verified_at)
+
+    def test_employee_cannot_review_document(self):
+        with self.assertRaises(PermissionDenied):
+            self.service.review_document(
+                document_id=self.document.pk,
+                actor=self.owner,
+                decision=DocumentReview.Decision.APPROVED,
+            )
+
+        self.assertFalse(
+            DocumentReview.objects.filter(document=self.document).exists()
+        )
+
+    def test_document_owner_cannot_review_even_with_hr_role(self):
+        self.owner.role = "HR_MANAGER"
+        self.owner.save(update_fields=["role"])
+
+        with self.assertRaises(PermissionDenied):
+            self.service.review_document(
+                document_id=self.document.pk,
+                actor=self.owner,
+                decision=DocumentReview.Decision.APPROVED,
+            )
+
+        self.assertFalse(
+            DocumentReview.objects.filter(document=self.document).exists()
+        )
+
+    def test_inactive_reviewer_is_denied(self):
+        self.reviewer.is_active = False
+        self.reviewer.save(update_fields=["is_active"])
+
+        with self.assertRaises(PermissionDenied):
+            self.review()
+
+        self.assertFalse(
+            DocumentReview.objects.filter(document=self.document).exists()
+        )
+
+    def test_invalid_decision_is_rejected(self):
+        with self.assertRaises(ValidationError):
+            self.review(decision="PENDING")
+
+        self.document.refresh_from_db()
+
+        self.assertEqual(
+            self.document.status,
+            HRDocument.Status.PENDING_REVIEW,
+        )
+        self.assertFalse(
+            DocumentReview.objects.filter(document=self.document).exists()
+        )
+
+    def test_document_not_pending_review_cannot_be_reviewed(self):
+        self.document.status = HRDocument.Status.ARCHIVED
+        self.document.save(update_fields=["status"])
+
+        with self.assertRaises(ValidationError):
+            self.review()
+
+        self.assertFalse(
+            DocumentReview.objects.filter(document=self.document).exists()
+        )
+
+    def test_version_from_another_document_is_rejected(self):
+        version = DocumentVersion.objects.create(
+            document=self.document,
+            version_number=1,
+            storage_key=(
+                f"hr-document-versions/{self.document.pk}/review-v1.pdf"
+            ),
+            original_filename="review-v1.pdf",
+            mime_type="application/pdf",
+            size_bytes=1024,
+            checksum_sha256="a" * 64,
+            created_by=self.owner,
+        )
+
+        other_document = HRDocument.objects.create(
+            employee=self.profile,
+            title="Tax Form",
+            document_type=HRDocument.DocumentType.TAX_FORM,
+            original_filename="tax.pdf",
+            storage_key="hr-documents/review/tax.pdf",
+            mime_type="application/pdf",
+            size_bytes=512,
+            uploaded_by=self.owner,
+            status=HRDocument.Status.PENDING_REVIEW,
+        )
+
+        with self.assertRaises(ValidationError):
+            self.service.review_document(
+                document_id=other_document.pk,
+                actor=self.reviewer,
+                decision=DocumentReview.Decision.APPROVED,
+                version_id=version.pk,
+            )
+
+        self.assertFalse(
+            DocumentReview.objects.filter(
+                document=other_document
+            ).exists()
+        )
+
+    def test_version_review_does_not_change_parent_status(self):
+        version = DocumentVersion.objects.create(
+            document=self.document,
+            version_number=1,
+            storage_key=(
+                f"hr-document-versions/{self.document.pk}/review-version.pdf"
+            ),
+            original_filename="review-version.pdf",
+            mime_type="application/pdf",
+            size_bytes=1024,
+            checksum_sha256="b" * 64,
+            created_by=self.owner,
+        )
+
+        review = self.service.review_document(
+            document_id=self.document.pk,
+            actor=self.reviewer,
+            decision=DocumentReview.Decision.APPROVED,
+            version_id=version.pk,
+        )
+
+        self.document.refresh_from_db()
+
+        self.assertEqual(review.version, version)
+        self.assertEqual(
+            self.document.status,
+            HRDocument.Status.PENDING_REVIEW,
+        )
+
+    def test_failed_document_update_rolls_back_review(self):
+        with patch.object(
+            HRDocument,
+            "save",
+            side_effect=RuntimeError("Simulated database failure"),
+        ):
+            with self.assertRaises(RuntimeError):
+                self.review()
+
+        self.assertFalse(
+            DocumentReview.objects.filter(document=self.document).exists()
+        )
+
+        self.document.refresh_from_db()
+        self.assertEqual(
+            self.document.status,
+            HRDocument.Status.PENDING_REVIEW,
+        )
+
+    def test_review_record_cannot_be_updated_or_deleted(self):
+        review = self.review()
+
+        review.comment = "Changed after the decision."
+
+        with self.assertRaises(ValidationError):
+            review.save()
+
+        with self.assertRaises(ValidationError):
+            review.delete()
+
+class DocumentRetentionPolicyTests(TestCase):
+    """Tests for HR document retention policies."""
+
+    def test_create_archive_policy(self):
+        policy = DocumentRetentionPolicy.objects.create(
+            name="Identity document retention",
+            document_type=HRDocument.DocumentType.IDENTITY_DOCUMENT,
+            retention_days=365,
+            action=DocumentRetentionPolicy.Action.ARCHIVE,
+        )
+
+        self.assertEqual(policy.retention_days, 365)
+        self.assertEqual(
+            policy.action,
+            DocumentRetentionPolicy.Action.ARCHIVE,
+        )
+        self.assertTrue(policy.is_active)
+
+    def test_create_delete_policy(self):
+        policy = DocumentRetentionPolicy.objects.create(
+            name="Expired tax form retention",
+            document_type=HRDocument.DocumentType.TAX_FORM,
+            retention_days=730,
+            action=DocumentRetentionPolicy.Action.DELETE,
+        )
+
+        self.assertEqual(
+            policy.action,
+            DocumentRetentionPolicy.Action.DELETE,
+        )
+
+    def test_default_values(self):
+        policy = DocumentRetentionPolicy.objects.create(
+            name="Employment contract retention",
+            document_type=HRDocument.DocumentType.EMPLOYMENT_CONTRACT,
+            retention_days=365,
+        )
+
+        self.assertEqual(
+            policy.retention_basis,
+            DocumentRetentionPolicy.RetentionBasis.UPLOAD_DATE,
+        )
+        self.assertEqual(
+            policy.action,
+            DocumentRetentionPolicy.Action.ARCHIVE,
+        )
+        self.assertTrue(policy.is_active)
+
+    def test_zero_retention_days_is_invalid(self):
+        policy = DocumentRetentionPolicy(
+            name="Invalid zero retention",
+            document_type=HRDocument.DocumentType.OTHER,
+            retention_days=0,
+        )
+
+        with self.assertRaises(ValidationError):
+            policy.full_clean()
+
+    def test_negative_retention_days_is_invalid(self):
+        policy = DocumentRetentionPolicy(
+            name="Invalid negative retention",
+            document_type=HRDocument.DocumentType.OTHER,
+            retention_days=-1,
+        )
+
+        with self.assertRaises(ValidationError):
+            policy.full_clean()
+
+    def test_policy_can_be_deactivated(self):
+        policy = DocumentRetentionPolicy.objects.create(
+            name="Inactive policy",
+            document_type=HRDocument.DocumentType.CERTIFICATION,
+            retention_days=365,
+        )
+
+        policy.is_active = False
+        policy.save(update_fields=["is_active"])
+
+        policy.refresh_from_db()
+        self.assertFalse(policy.is_active)
+
+    def test_policy_name_must_be_unique(self):
+        DocumentRetentionPolicy.objects.create(
+            name="Unique retention policy",
+            document_type=HRDocument.DocumentType.OTHER,
+            retention_days=365,
+        )
+
+        duplicate = DocumentRetentionPolicy(
+            name="Unique retention policy",
+            document_type=HRDocument.DocumentType.TAX_FORM,
+            retention_days=730,
+        )
+
+        with self.assertRaises(ValidationError):
+            duplicate.full_clean()
+    def test_database_rejects_duplicate_active_policy(self):
+        from django.db import IntegrityError, transaction
+
+        DocumentRetentionPolicy.objects.create(
+            name="Database identity retention",
+            document_type=HRDocument.DocumentType.IDENTITY_DOCUMENT,
+            retention_days=365,
+        )
+
+        with self.assertRaises(IntegrityError):
+            with transaction.atomic():
+                DocumentRetentionPolicy.objects.bulk_create([
+                    DocumentRetentionPolicy(
+                        name="Database duplicate identity retention",
+                        document_type=HRDocument.DocumentType.IDENTITY_DOCUMENT,
+                        retention_days=730,
+                    )
+                ])
+
+class DocumentExpirationServiceTests(TestCase):
+    """Tests for document retention and expiration processing."""
+
+    def setUp(self):
+        from datetime import date, datetime, timedelta
+
+        from django.utils import timezone
+
+        from employees.services.document_expiration import (
+            DocumentExpirationService,
+        )
+        self.timezone = timezone
+        self.service = DocumentExpirationService
+        self.date = date
+        self.datetime = datetime
+        self.timedelta = timedelta
+        self.today = timezone.localdate()
+
+        self.user = User.objects.create_user(
+            email="expiration-owner@example.com",
+            name="Expiration Owner",
+            password="TestPass123!",
+        )
+
+        self.department = Department.objects.create(
+            name="Expiration Department",
+            code="EXP",
+        )
+
+        self.position = Position.objects.create(
+            title="Expiration Employee",
+            department=self.department,
+        )
+
+        self.profile = EmployeeProfile.objects.create(
+            user=self.user,
+            employee_id="EXP-001",
+            department=self.department,
+            position=self.position,
+            hire_date=date(2026, 1, 15),
+        )
+
+        self.document = HRDocument.objects.create(
+            employee=self.profile,
+            title="Expiration Contract",
+            document_type=HRDocument.DocumentType.EMPLOYMENT_CONTRACT,
+            original_filename="expiration-contract.pdf",
+            storage_key="hr-documents/test/expiration-contract.pdf",
+            mime_type="application/pdf",
+            size_bytes=1024,
+            uploaded_by=self.user,
+        )
+
+        self.policy = DocumentRetentionPolicy.objects.create(
+            name="Expiration test policy",
+            document_type=HRDocument.DocumentType.EMPLOYMENT_CONTRACT,
+            retention_days=30,
+            retention_basis=(
+                DocumentRetentionPolicy.RetentionBasis.UPLOAD_DATE
+            ),
+            action=DocumentRetentionPolicy.Action.ARCHIVE,
+        )
+
+    def test_calculates_upload_date_deadline(self):
+        self.document.uploaded_at = self.timezone.make_aware(
+            self.datetime.combine(
+                self.today - self.timedelta(days=40),
+                self.datetime.min.time(),
+            )
+        )
+        self.document.save(update_fields=["uploaded_at"])
+
+        deadline = self.service.get_retention_deadline(
+            self.document,
+            self.policy,
+        )
+
+        self.assertEqual(
+            deadline,
+            self.today - self.timedelta(days=10),
+        )
+
+
+    def test_document_is_eligible_after_deadline(self):
+
+        self.document.uploaded_at = self.timezone.make_aware(
+            self.datetime.combine(
+                self.today - self.timedelta(days=31),
+                self.datetime.min.time(),
+            )
+        )
+
+        self.document.save(update_fields=["uploaded_at"])
+
+        self.assertTrue(
+            self.service.is_eligible(
+                self.document,
+                self.policy,
+                today=self.today,
+            )
+        )
+
+    def test_document_is_not_eligible_before_deadline(self):
+        self.document.uploaded_at = self.timezone.make_aware(
+            self.datetime.combine(
+                self.today - self.timedelta(days=29),
+                self.datetime.min.time(),
+            )
+        )
+
+        self.document.save(update_fields=["uploaded_at"])
+
+        self.assertFalse(
+            self.service.is_eligible(
+                self.document,
+                self.policy,
+                today=self.today,
+            )
+        )
+
+    def test_inactive_policy_is_not_eligible(self):
+        self.document.uploaded_at = self.timezone.make_aware(
+            self.datetime.combine(
+                self.today - self.timedelta(days=60),
+                self.datetime.min.time(),
+            )
+        )
+        self.document.save(update_fields=["uploaded_at"])
+        self.policy.is_active = False
+        self.policy.save(update_fields=["is_active"])
+
+        self.assertFalse(
+            self.service.is_eligible(
+                self.document,
+                self.policy,
+                today=self.today,
+            )
+        )
+
+
+    def test_missing_reference_date_is_not_eligible(self):
+        self.policy.retention_basis = (
+            DocumentRetentionPolicy.RetentionBasis.VERIFICATION_DATE
+        )
+        self.policy.save(update_fields=["retention_basis"])
+
+        self.document.verified_at = None
+        self.document.save(update_fields=["verified_at"])
+
+        self.assertIsNone(
+            self.service.get_retention_deadline(
+                self.document,
+                self.policy,
+            )
+        )
+        self.assertFalse(
+            self.service.is_eligible(
+                self.document,
+                self.policy,
+                today=self.today,
+            )
+        )
+
+
+    def test_processes_eligible_document_by_archiving_it(self):
+        self.document.uploaded_at = self.timezone.make_aware(
+            self.datetime.combine(
+                self.today - self.timedelta(days=31),
+                self.datetime.min.time(),
+            )
+        )
+        self.document.save(update_fields=["uploaded_at"])
+
+        result = self.service.process_document(
+            self.document,
+            self.policy,
+            today=self.today,
+        )
+
+        self.document.refresh_from_db()
+
+        self.assertEqual(result["action"], "ARCHIVED")
+        self.assertEqual(
+            self.document.status,
+            HRDocument.Status.ARCHIVED,
+        )
+
+    def test_dry_run_would_archive_without_modifying_document(self):
+        self.document.uploaded_at = self.timezone.make_aware(
+            self.datetime.combine(
+                self.today - self.timedelta(days=31),
+                self.datetime.min.time(),
+            )
+        )
+        self.document.save(update_fields=["uploaded_at"])
+
+        original_status = self.document.status
+
+        result = self.service.process_document(
+            self.document,
+            self.policy,
+            today=self.today,
+            dry_run=True,
+        )
+
+        self.document.refresh_from_db()
+
+        self.assertEqual(result["action"], "WOULD_ARCHIVE")
+        self.assertEqual(
+            self.document.status,
+            original_status,
+        )
+        self.assertTrue(
+            HRDocument.objects.filter(pk=self.document.pk).exists()
+        )
+
+    def test_dry_run_delete_policy_does_not_delete_document(self):
+        self.document.uploaded_at = self.timezone.make_aware(
+            self.datetime.combine(
+                self.today - self.timedelta(days=31),
+                self.datetime.min.time(),
+            )
+        )
+        self.document.save(update_fields=["uploaded_at"])
+
+        self.policy.action = DocumentRetentionPolicy.Action.DELETE
+        self.policy.save(update_fields=["action"])
+
+        original_status = self.document.status
+
+        result = self.service.process_document(
+            self.document,
+            self.policy,
+            today=self.today,
+            dry_run=True,
+        )
+
+        self.document.refresh_from_db()
+
+        self.assertEqual(result["action"], "SKIPPED")
+        self.assertEqual(
+            self.document.status,
+            original_status,
+        )
+        self.assertTrue(
+            HRDocument.objects.filter(pk=self.document.pk).exists()
+        )
+
+    def test_delete_policy_does_not_physically_delete_document(self):
+        self.document.uploaded_at = self.timezone.make_aware(
+            self.datetime.combine(
+                self.today - self.timedelta(days=31),
+                self.datetime.min.time(),
+            )
+        )
+        self.document.save(update_fields=["uploaded_at"])
+
+        self.policy.action = DocumentRetentionPolicy.Action.DELETE
+        self.policy.save(update_fields=["action"])
+
+        result = self.service.process_document(
+            self.document,
+            self.policy,
+            today=self.today,
+        )
+
+        self.document.refresh_from_db()
+
+        self.assertEqual(result["action"], "SKIPPED")
+        self.assertEqual(
+            self.document.status,
+            HRDocument.Status.PENDING_SCAN,
+        )
+        self.assertTrue(
+            HRDocument.objects.filter(pk=self.document.pk).exists()
+        )
+
+    def test_archived_document_is_not_processed_again(self):
+        self.document.uploaded_at = self.timezone.make_aware(
+            self.datetime.combine(
+                self.today - self.timedelta(days=31),
+                self.datetime.min.time(),
+            )
+        )
+        self.document.status = HRDocument.Status.ARCHIVED
+        self.document.save(update_fields=["uploaded_at", "status"])
+
+        self.assertFalse(
+            self.service.is_eligible(
+                self.document,
+                self.policy,
+                today=self.today,
+            )
+        )
+
+    def test_expiration_date_policy_uses_document_expiration(self):
+        self.policy.retention_basis = (
+            DocumentRetentionPolicy.RetentionBasis.EXPIRATION_DATE
+        )
+        self.policy.save(update_fields=["retention_basis"])
+
+        self.document.expires_at = self.today - self.timedelta(days=10)
+        self.document.save(update_fields=["expires_at"])
+
+        self.assertEqual(
+            self.service.get_retention_deadline(
+                self.document,
+                self.policy,
+            ),
+            self.today + self.timedelta(days=20),
+        )
+
+    def test_verification_date_policy_uses_verification_timestamp(self):
+        self.policy.retention_basis = (
+            DocumentRetentionPolicy.RetentionBasis.VERIFICATION_DATE
+        )
+        self.policy.save(update_fields=["retention_basis"])
+
+        self.document.verified_at = self.timezone.now() - self.timedelta(days=40)
+        self.document.save(update_fields=["verified_at"])
+
+        self.assertEqual(
+            self.service.get_retention_deadline(
+                self.document,
+                self.policy,
+            ),
+            self.today - self.timedelta(days=10),
+        )
+    def test_document_is_eligible_on_exact_deadline(self):
+        self.document.uploaded_at = self.timezone.make_aware(
+            self.datetime.combine(
+                self.today - self.timedelta(days=30),
+                self.datetime.min.time(),
+            )
+        )
+        self.document.save(update_fields=["uploaded_at"])
+
+        deadline = self.service.get_retention_deadline(
+            self.document,
+            self.policy,
+        )
+
+        self.assertEqual(deadline, self.today)
+        self.assertTrue(
+            self.service.is_eligible(
+                self.document,
+                self.policy,
+                today=self.today,
+            )
+        )
+    def test_process_expired_documents_handles_multiple_documents(self):
+        self.document.uploaded_at = self.timezone.make_aware(
+            self.datetime.combine(
+                self.today - self.timedelta(days=30),
+                self.datetime.min.time(),
+            )
+        )
+        self.document.save(update_fields=["uploaded_at"])
+
+        future_document = HRDocument.objects.create(
+            employee=self.profile,
+            title="Future Retention Contract",
+            document_type=HRDocument.DocumentType.EMPLOYMENT_CONTRACT,
+            original_filename="future-contract.pdf",
+            storage_key="hr-documents/test/future-contract.pdf",
+            mime_type="application/pdf",
+            size_bytes=1024,
+            uploaded_by=self.user,
+        )
+        future_document.uploaded_at = self.timezone.make_aware(
+            self.datetime.combine(
+                self.today - self.timedelta(days=10),
+                self.datetime.min.time(),
+            )
+        )
+        future_document.save(update_fields=["uploaded_at"])
+
+        summary = self.service.process_expired_documents(
+            today=self.today,
+        )
+
+        self.document.refresh_from_db()
+        future_document.refresh_from_db()
+
+        self.assertEqual(summary["processed"], 2)
+        self.assertEqual(summary["archived"], 1)
+        self.assertEqual(summary["skipped"], 1)
+        self.assertEqual(
+            self.document.status,
+            HRDocument.Status.ARCHIVED,
+        )
+        self.assertNotEqual(
+            future_document.status,
+            HRDocument.Status.ARCHIVED,
+        )
+
+    def test_inactive_policy_does_not_conflict_with_active_policy(self):
+        self.document.uploaded_at = self.timezone.make_aware(
+            self.datetime.combine(
+                self.today - self.timedelta(days=31),
+                self.datetime.min.time(),
+            )
+        )
+        self.document.save(update_fields=["uploaded_at"])
+
+        self.policy.is_active = False
+        self.policy.save(update_fields=["is_active"])
+
+        DocumentRetentionPolicy.objects.create(
+            name="Active archive employment contract",
+            document_type=HRDocument.DocumentType.EMPLOYMENT_CONTRACT,
+            retention_days=30,
+            retention_basis=(
+                DocumentRetentionPolicy.RetentionBasis.UPLOAD_DATE
+            ),
+            action=DocumentRetentionPolicy.Action.ARCHIVE,
+        )
+
+        summary = self.service.process_expired_documents(
+            today=self.today,
+        )
+
+        self.document.refresh_from_db()
+
+        self.assertEqual(
+            self.document.status,
+            HRDocument.Status.ARCHIVED,
+        )
+        self.assertEqual(summary["processed"], 1)
+        self.assertEqual(summary["archived"], 1)
+        self.assertEqual(summary["skipped"], 0)
+
+    def test_only_one_active_policy_per_document_type(self):
+        DocumentRetentionPolicy.objects.create(
+            name="Active identity retention",
+            document_type=HRDocument.DocumentType.IDENTITY_DOCUMENT,
+            retention_days=365,
+        )
+
+        duplicate = DocumentRetentionPolicy(
+            name="Second active identity retention",
+            document_type=HRDocument.DocumentType.IDENTITY_DOCUMENT,
+            retention_days=730,
+        )
+
+        with self.assertRaises(ValidationError):
+            duplicate.full_clean()
+
+    def test_inactive_policy_allows_new_active_policy_for_same_type(self):
+        DocumentRetentionPolicy.objects.create(
+            name="Inactive identity retention",
+            document_type=HRDocument.DocumentType.IDENTITY_DOCUMENT,
+            retention_days=365,
+            is_active=False,
+        )
+
+        active_policy = DocumentRetentionPolicy.objects.create(
+            name="New active identity retention",
+            document_type=HRDocument.DocumentType.IDENTITY_DOCUMENT,
+            retention_days=730,
+        )
+
+        self.assertTrue(active_policy.is_active)
+
+    def test_process_expired_documents_dry_run_integration(self):
+        """Dry-run detects an expired document without modifying it."""
+        from datetime import datetime
+
+        self.document.uploaded_at = self.timezone.make_aware(
+            datetime.combine(
+                self.today - self.timedelta(days=31),
+                datetime.min.time(),
+            )
+        )
+        self.document.save(update_fields=["uploaded_at"])
+
+        result = self.service.process_expired_documents(
+            today=self.today,
+            dry_run=True,
+        )
+
+        self.document.refresh_from_db()
+
+        self.assertEqual(result["processed"], 1)
+        self.assertEqual(result["would_archive"], 1)
+        self.assertEqual(result["archived"], 0)
+        self.assertEqual(result["skipped"], 0)
+        self.assertEqual(
+            result["results"][0]["action"],
+            "WOULD_ARCHIVE",
+        )
+        self.assertEqual(
+            self.document.status,
+            HRDocument.Status.PENDING_SCAN,
+        )
+        self.assertTrue(
+            HRDocument.objects.filter(pk=self.document.pk).exists()
+        )
+
+    def test_process_expired_documents_archives_eligible_document(self):
+        """Real processing archives an expired document."""
+        from datetime import datetime
+
+        self.document.uploaded_at = self.timezone.make_aware(
+            datetime.combine(
+                self.today - self.timedelta(days=31),
+                datetime.min.time(),
+            )
+        )
+        self.document.save(update_fields=["uploaded_at"])
+
+        result = self.service.process_expired_documents(
+            today=self.today,
+            dry_run=False,
+        )
+
+        self.document.refresh_from_db()
+
+        self.assertEqual(result["processed"], 1)
+        self.assertEqual(result["archived"], 1)
+        self.assertEqual(result["would_archive"], 0)
+        self.assertEqual(result["skipped"], 0)
+        self.assertEqual(
+            result["results"][0]["action"],
+            "ARCHIVED",
+        )
+        self.assertEqual(
+            self.document.status,
+            HRDocument.Status.ARCHIVED,
+        )
+        self.assertTrue(
+            HRDocument.objects.filter(pk=self.document.pk).exists()
+        )
+
+class DocumentAuditServiceTests(TestCase):
+    """Tests for sensitive HR document audit logging."""
+
+    def setUp(self):
+        from rest_framework.test import APIRequestFactory
+
+        from employees.models import DocumentAccessLog
+        from employees.services.document_audit import (
+            DocumentAuditService,
+        )
+
+        self.DocumentAccessLog = DocumentAccessLog
+        self.service = DocumentAuditService
+        self.factory = APIRequestFactory()
+
+        self.user = User.objects.create_user(
+            email="audit-employee@example.com",
+            name="Audit Employee",
+            password="StrongPassword123!",
+            role="EMPLOYEE",
+        )
+
+        department = Department.objects.create(
+            name="Audit Test Department",
+            code="AUD",
+        )
+        position = Position.objects.create(
+            title="Audit Test Position",
+            department=department,
+        )
+        profile = EmployeeProfile.objects.create(
+            user=self.user,
+            employee_id="AUD-001",
+            department=department,
+            position=position,
+            hire_date=date(2026, 1, 15),
+        )
+
+        self.document = HRDocument.objects.create(
+            employee=profile,
+            title="Audit Test Contract",
+            document_type=HRDocument.DocumentType.EMPLOYMENT_CONTRACT,
+            original_filename="audit-contract.pdf",
+            storage_key="hr-documents/audit/contract.pdf",
+            mime_type="application/pdf",
+            size_bytes=1024,
+            uploaded_by=self.user,
+        )
+
+        self.request = self.factory.get(
+            "/api/hr-documents/",
+            HTTP_USER_AGENT="DocumentAuditServiceTests",
+        )
+        self.request.user = self.user
+
+    def test_record_creates_document_access_log(self):
+        entry = self.service.record(
+            request=self.request,
+            action=self.DocumentAccessLog.Action.VIEW,
+            document=self.document,
+            details="Document metadata viewed.",
+        )
+
+        self.assertTrue(
+            self.DocumentAccessLog.objects.filter(pk=entry.pk).exists()
+        )
+        self.assertEqual(entry.user, self.user)
+        self.assertEqual(entry.document, self.document)
+        self.assertEqual(
+            entry.action,
+            self.DocumentAccessLog.Action.VIEW,
+        )
+        self.assertEqual(entry.request_path, "/api/hr-documents/")
+        self.assertEqual(
+            entry.user_agent,
+            "DocumentAuditServiceTests",
+        )
+        self.assertEqual(entry.details, "Document metadata viewed.")
+
+    def test_record_supports_anonymous_request(self):
+        request = self.factory.get("/api/hr-documents/")
+        request.user = type(
+            "AnonymousUser",
+            (),
+            {"is_authenticated": False},
+        )()
+
+        entry = self.service.record(
+            request=request,
+            action=self.DocumentAccessLog.Action.ACCESS_DENIED,
+            document=self.document,
+            details="Unauthenticated access attempt.",
+        )
+
+        self.assertIsNone(entry.user)
+        self.assertEqual(
+            entry.action,
+            self.DocumentAccessLog.Action.ACCESS_DENIED,
+        )
+
+    @patch("employees.services.document_audit.create_security_event")
+    def test_record_emits_security_event_when_requested(
+        self,
+        mock_create_security_event,
+    ):
+        entry = self.service.record(
+            request=self.request,
+            action=self.DocumentAccessLog.Action.VERIFY,
+            document=self.document,
+            details="Document verified.",
+            emit_security_event=True,
+            event_type="HR_DOCUMENT_VERIFIED",
+        )
+
+        self.assertTrue(
+            self.DocumentAccessLog.objects.filter(pk=entry.pk).exists()
+        )
+        mock_create_security_event.assert_called_once_with(
+            request=self.request,
+            user=self.user,
+            event_type="HR_DOCUMENT_VERIFIED",
+            details="Document verified.",
+        )
+
+    @patch(
+        "employees.services.document_audit.create_security_event",
+        side_effect=RuntimeError("SIEM unavailable"),
+    )
+    def test_record_preserves_audit_entry_when_siem_fails(
+        self,
+        mock_create_security_event,
+    ):
+        with self.assertLogs(
+            "employees.services.document_audit",
+            level="ERROR",
+        ):
+            entry = self.service.record(
+                request=self.request,
+                action=self.DocumentAccessLog.Action.DOWNLOAD,
+                document=self.document,
+                details="Document download attempted.",
+                emit_security_event=True,
+                event_type="HR_DOCUMENT_DOWNLOADED",
+            )
+
+        self.assertTrue(
+            self.DocumentAccessLog.objects.filter(pk=entry.pk).exists()
+        )
+        mock_create_security_event.assert_called_once()
+
+class DocumentAccessLogAPITests(TestCase):
+    """Tests for the read-only document audit log API."""
+
+    def setUp(self):
+        self.client = APIClient()
+
+        self.super_admin = User.objects.create_user(
+            email="audit-admin@example.com",
+            name="Audit Super Admin",
+            password="StrongPassword123!",
+            role="SUPER_ADMIN",
+            is_staff=True,
+            is_superuser=True,
+        )
+        self.hr_admin = User.objects.create_user(
+            email="audit-hradmin@example.com",
+            name="Audit HR Admin",
+            password="StrongPassword123!",
+            role="HR_ADMIN",
+        )
+        self.hr_manager = User.objects.create_user(
+            email="audit-manager@example.com",
+            name="Audit HR Manager",
+            password="StrongPassword123!",
+            role="HR_MANAGER",
+        )
+        self.employee = User.objects.create_user(
+            email="audit-employee@example.com",
+            name="Audit Employee",
+            password="StrongPassword123!",
+            role="EMPLOYEE",
+        )
+        self.inactive_hr_admin = User.objects.create_user(
+            email="audit-inactive@example.com",
+            name="Inactive Audit HR Admin",
+            password="StrongPassword123!",
+            role="HR_ADMIN",
+            is_active=False,
+        )
+
+        self.department = Department.objects.create(
+            name="Audit Test Department",
+            code="AUD",
+        )
+        self.position = Position.objects.create(
+            title="Audit Test Position",
+            department=self.department,
+        )
+        self.profile = EmployeeProfile.objects.create(
+            user=self.employee,
+            employee_id="AUD-001",
+            department=self.department,
+            position=self.position,
+            hire_date=date(2026, 1, 15),
+        )
+
+        self.document = HRDocument.objects.create(
+            employee=self.profile,
+            title="Audit Test Contract",
+            document_type=HRDocument.DocumentType.EMPLOYMENT_CONTRACT,
+            original_filename="audit-contract.pdf",
+            storage_key="hr-documents/audit-tests/audit-contract.pdf",
+            mime_type="application/pdf",
+            size_bytes=1024,
+            uploaded_by=self.hr_admin,
+        )
+
+        self.url = "/api/v1/employees/document-access-logs/"
+
+        self.view_log = DocumentAccessLog.objects.create(
+            document=self.document,
+            user=self.employee,
+            action=DocumentAccessLog.Action.VIEW,
+            ip_address="192.0.2.10",
+            user_agent="DocumentAccessLogAPITests",
+            request_path="/api/v1/employees/hr-documents/",
+            details="Audit test document viewed.",
+        )
+        self.download_log = DocumentAccessLog.objects.create(
+            document=self.document,
+            user=self.hr_admin,
+            action=DocumentAccessLog.Action.DOWNLOAD,
+            ip_address="192.0.2.11",
+            user_agent="DocumentAccessLogAPITests",
+            request_path="/api/v1/employees/hr-documents/download/",
+            details="Audit test document downloaded.",
+        )
+        self.verify_log = DocumentAccessLog.objects.create(
+            document=self.document,
+            user=self.hr_manager,
+            action=DocumentAccessLog.Action.VERIFY,
+            ip_address="192.0.2.12",
+            user_agent="DocumentAccessLogAPITests",
+            request_path="/api/v1/employees/hr-documents/verify/",
+            details="Audit test document verified.",
+        )
+
+    def authenticate(self, user):
+        self.client.force_authenticate(user=user)
+
+    def test_authorized_hr_roles_can_list_audit_logs(self):
+        for user in (
+            self.super_admin,
+            self.hr_admin,
+            self.hr_manager,
+        ):
+            with self.subTest(role=user.role):
+                self.client.force_authenticate(user=user)
+                response = self.client.get(self.url)
+                self.assertEqual(
+                    response.status_code,
+                    status.HTTP_200_OK,
+                )
+                self.assertGreaterEqual(response.data["count"], 3)
+
+    def test_authorized_hr_role_can_retrieve_audit_log(self):
+        self.authenticate(self.hr_admin)
+
+        response = self.client.get(
+            f"{self.url}{self.view_log.pk}/"
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["id"], self.view_log.pk)
+        self.assertEqual(response.data["action"], "VIEW")
+
+    def test_employee_is_denied_access(self):
+        self.authenticate(self.employee)
+
+        response = self.client.get(self.url)
+
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_403_FORBIDDEN,
+        )
+
+    def test_inactive_hr_account_is_denied_access(self):
+        self.authenticate(self.inactive_hr_admin)
+
+        response = self.client.get(self.url)
+
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_403_FORBIDDEN,
+        )
+
+    def test_audit_log_api_is_read_only(self):
+        self.authenticate(self.hr_admin)
+
+        response = self.client.post(
+            self.url,
+            {
+                "action": "VIEW",
+                "details": "Attempt to create a log through the API.",
+            },
+            format="json",
+        )
+
+        self.assertIn(
+            response.status_code,
+            (
+                status.HTTP_403_FORBIDDEN,
+                status.HTTP_405_METHOD_NOT_ALLOWED,
+            ),
+        )
+
+    def test_filter_by_action(self):
+        self.authenticate(self.hr_admin)
+
+        response = self.client.get(
+            self.url,
+            {"action": "DOWNLOAD"},
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["count"], 1)
+        self.assertEqual(
+            response.data["results"][0]["action"],
+            "DOWNLOAD",
+        )
+
+    def test_filter_by_user(self):
+        self.authenticate(self.hr_admin)
+
+        response = self.client.get(
+            self.url,
+            {"user": self.employee.pk},
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["count"], 1)
+        self.assertEqual(
+            response.data["results"][0]["user"],
+            self.employee.pk,
+        )
+
+    def test_filter_by_document(self):
+        self.authenticate(self.hr_admin)
+
+        response = self.client.get(
+            self.url,
+            {"document": str(self.document.pk)},
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["count"], 3)
+
+    def test_filter_by_date_range(self):
+        self.authenticate(self.hr_admin)
+
+        response = self.client.get(
+            self.url,
+            {
+                "created_after": "2020-01-01T00:00:00Z",
+                "created_before": "2035-01-01T00:00:00Z",
+            },
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["count"], 3)
+
+    def test_search_by_details(self):
+        self.authenticate(self.hr_admin)
+
+        response = self.client.get(
+            self.url,
+            {"search": "document downloaded"},
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["count"], 1)
+        self.assertEqual(
+            response.data["results"][0]["action"],
+            "DOWNLOAD",
+        )
+
+    def test_search_by_user_email(self):
+        self.authenticate(self.hr_admin)
+
+        response = self.client.get(
+            self.url,
+            {"search": "audit-employee@example.com"},
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["count"], 1)
+
+    def test_ordering_by_action(self):
+        self.authenticate(self.hr_admin)
+
+        response = self.client.get(
+            self.url,
+            {"ordering": "action"},
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        actions = [
+            item["action"]
+            for item in response.data["results"]
+        ]
+        self.assertEqual(actions, sorted(actions))
+
+    def test_pagination_defaults_to_twenty_results(self):
+        self.authenticate(self.hr_admin)
+
+        for index in range(22):
+            DocumentAccessLog.objects.create(
+                document=self.document,
+                user=self.employee,
+                action=DocumentAccessLog.Action.VIEW,
+                request_path=f"/audit-pagination/{index}/",
+                details=f"Pagination test entry {index}.",
+            )
+
+        response = self.client.get(self.url)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["count"], 25)
+        self.assertEqual(len(response.data["results"]), 20)
+        self.assertIsNotNone(response.data["next"])
+
+    def test_pagination_respects_requested_page_size(self):
+        self.authenticate(self.hr_admin)
+
+        response = self.client.get(
+            self.url,
+            {"page_size": 2},
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(response.data["results"]), 2)
+
+    def test_pagination_caps_page_size_at_one_hundred(self):
+        self.authenticate(self.hr_admin)
+
+        for index in range(105):
+            DocumentAccessLog.objects.create(
+                document=self.document,
+                user=self.employee,
+                action=DocumentAccessLog.Action.VIEW,
+                request_path=f"/audit-page-cap/{index}/",
+                details=f"Page cap test entry {index}.",
+            )
+
+        response = self.client.get(
+            self.url,
+            {"page_size": 500},
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(response.data["results"]), 100)
+        self.assertIsNotNone(response.data["next"])
+
+class OnboardingMetricsServiceTests(TestCase):
+    """Tests for enterprise onboarding dashboard metrics."""
+
+    def setUp(self):
+        from employees.models import (
+            OnboardingJourney,
+            OnboardingTask,
+            OnboardingTemplate,
+            OnboardingPhase,
+            OnboardingActivityTemplate,
+        )
+        from employees.services.dashboard.onboarding_metrics import (
+            OnboardingMetricsService,
+        )
+
+        self.OnboardingJourney = OnboardingJourney
+        self.OnboardingTask = OnboardingTask
+        self.OnboardingMetricsService = OnboardingMetricsService
+
+        self.admin = User.objects.create_user(
+            email="metrics-admin@example.com",
+            name="Metrics Admin",
+            password="TestPassword123!",
+            role="HR_ADMIN",
+            is_active=True,
+        )
+
+        self.employee_user = User.objects.create_user(
+            email="metrics-employee@example.com",
+            name="Metrics Employee",
+            password="TestPassword123!",
+            is_active=True,
+        )
+
+        self.department = Department.objects.create(
+            name="Metrics Department",
+            code="METRICS",
+        )
+
+        self.position = Position.objects.create(
+            title="Metrics Specialist",
+            department=self.department,
+        )
+
+        self.employee = EmployeeProfile.objects.create(
+            user=self.employee_user,
+            employee_id="METRICS-001",
+            department=self.department,
+            position=self.position,
+            hire_date=date.today(),
+        )
+
+        template = OnboardingTemplate.objects.create(
+            name="Metrics Template",
+            description="Dashboard metrics test",
+            version=1,
+            created_by=self.admin,
+        )
+
+        phase = OnboardingPhase.objects.create(
+            template=template,
+            name="First phase",
+            description="Metrics phase",
+            order=1,
+        )
+
+        activity = OnboardingActivityTemplate.objects.create(
+            phase=phase,
+            name="Metrics activity",
+            description="Metrics task",
+            order=1,
+            is_required=True,
+            default_due_days=3,
+        )
+
+        from employees.services.onboarding import OnboardingService
+
+        OnboardingService.publish_template(template.pk)
+
+        self.journey = OnboardingService.create_journey(
+            employee_id=self.employee.pk,
+            template_id=template.pk,
+            created_by=self.admin,
+        )
+
+        self.activity = activity
+
+    def create_task(
+        self,
+        *,
+        title,
+        status="PENDING",
+        priority="MEDIUM",
+        due_date=None,
+    ):
+        return self.OnboardingTask.objects.create(
+            journey=self.journey,
+            activity_template=self.activity,
+            title=title,
+            status=status,
+            priority=priority,
+            due_date=due_date,
+        )
+
+    def test_dashboard_returns_journey_and_task_metrics(self):
+        result = self.OnboardingMetricsService.get_dashboard()
+
+        self.assertEqual(result["journeys"]["total"], 1)
+        self.assertEqual(result["journeys"]["pending"], 1)
+        self.assertEqual(result["tasks"]["total"], 1)
+        self.assertEqual(result["tasks"]["pending"], 1)
+
+    def test_overdue_tasks_are_counted(self):
+        self.create_task(
+            title="Overdue task",
+            due_date=date(2020, 1, 1),
+        )
+
+        result = self.OnboardingMetricsService.get_dashboard(
+            as_of=date.today(),
+        )
+
+        self.assertEqual(result["tasks"]["overdue"], 1)
+
+    def test_completed_tasks_are_excluded_from_overdue_count(self):
+        self.create_task(
+            title="Completed task",
+            status="COMPLETED",
+            due_date=date(2020, 1, 1),
+        )
+
+        result = self.OnboardingMetricsService.get_dashboard(
+            as_of=date.today(),
+        )
+
+        self.assertEqual(result["tasks"]["overdue"], 0)
+
+    def test_progress_percentage_excludes_cancelled_tasks(self):
+        self.create_task(
+            title="Completed task",
+            status="COMPLETED",
+        )
+        self.create_task(
+            title="Cancelled task",
+            status="CANCELLED",
+        )
+        self.create_task(
+            title="Pending task",
+            status="PENDING",
+        )
+
+        result = self.OnboardingMetricsService.get_dashboard()
+
+        self.assertEqual(
+            result["progress"]["percentage"],
+            33.3,
+        )
+
+    def test_department_filter_limits_journeys(self):
+        result = self.OnboardingMetricsService.get_dashboard(
+            department_id=self.department.pk,
+        )
+
+        self.assertEqual(result["journeys"]["total"], 1)
+
+    def test_priority_metrics_are_counted(self):
+        self.create_task(
+            title="Urgent task",
+            priority="URGENT",
+        )
+        self.create_task(
+            title="High priority task",
+            priority="HIGH",
+        )
+
+        result = self.OnboardingMetricsService.get_dashboard()
+
+        self.assertEqual(result["tasks"]["urgent_priority"], 1)
+        self.assertEqual(result["tasks"]["high_priority"], 1)
+
+class OperationsMetricsServiceTests(TestCase):
+    """Tests for workflow and notification dashboard metrics."""
+
+    def setUp(self):
+        from employees.models import WorkflowExecutionLog
+        from employees.services.dashboard.operations_metrics import (
+            OperationsMetricsService,
+        )
+
+        self.WorkflowExecutionLog = WorkflowExecutionLog
+        self.OperationsMetricsService = OperationsMetricsService
+
+        self.admin = User.objects.create_user(
+            email="operations-admin@example.com",
+            name="Operations Admin",
+            password="TestPassword123!",
+            role="HR_ADMIN",
+            is_active=True,
+        )
+
+        self.department = Department.objects.create(
+            name="Operations Department",
+            code="OPERATIONS",
+        )
+
+        self.employee_user = User.objects.create_user(
+            email="operations-employee@example.com",
+            name="Operations Employee",
+            password="TestPassword123!",
+            is_active=True,
+        )
+
+        self.position = Position.objects.create(
+            title="Operations Specialist",
+            department=self.department,
+        )
+
+        self.employee = EmployeeProfile.objects.create(
+            user=self.employee_user,
+            employee_id="OPERATIONS-001",
+            department=self.department,
+            position=self.position,
+            hire_date=date.today(),
+        )
+
+    def create_log(
+        self,
+        *,
+        event_type,
+        outcome="SUCCESS",
+        details=None,
+        journey=None,
+    ):
+        return self.WorkflowExecutionLog.objects.create(
+            journey=journey,
+            actor=self.admin,
+            event_type=event_type,
+            outcome=outcome,
+            details=details or {},
+        )
+
+    def test_dashboard_returns_workflow_outcome_metrics(self):
+        self.create_log(event_type="TASK_ASSIGNED")
+        self.create_log(event_type="TASK_STATUS_CHANGED")
+        self.create_log(
+            event_type="NOTIFICATION_FAILED",
+            outcome="FAILURE",
+            details={"notification_type": "TASK_ASSIGNED"},
+        )
+        self.create_log(
+            event_type="TASK_STATUS_CHANGED",
+            outcome="DENIED",
+        )
+
+        result = self.OperationsMetricsService.get_dashboard()
+
+        self.assertEqual(result["workflows"]["total"], 4)
+        self.assertEqual(result["workflows"]["success"], 2)
+        self.assertEqual(result["workflows"]["failure"], 1)
+        self.assertEqual(result["workflows"]["denied"], 1)
+
+    def test_notification_failures_are_counted_separately(self):
+        self.create_log(
+            event_type="NOTIFICATION_FAILED",
+            outcome="FAILURE",
+            details={"notification_type": "TASK_ASSIGNED"},
+        )
+        self.create_log(
+            event_type="NOTIFICATION_FAILED",
+            outcome="FAILURE",
+            details={"notification_type": "TASK_COMPLETED"},
+        )
+        self.create_log(
+            event_type="TASK_STATUS_CHANGED",
+            outcome="FAILURE",
+        )
+
+        result = self.OperationsMetricsService.get_dashboard()
+
+        self.assertEqual(result["notifications"]["failed"], 2)
+        self.assertEqual(
+            sum(item["count"] for item in result["notifications"]["by_type"]),
+            2,
+        )
+
+    def test_event_distribution_groups_events_by_type(self):
+        self.create_log(event_type="TASK_ASSIGNED")
+        self.create_log(event_type="TASK_ASSIGNED")
+        self.create_log(event_type="TASK_STATUS_CHANGED")
+
+        result = self.OperationsMetricsService.get_dashboard()
+
+        distribution = {
+            item["event_type"]: item["count"]
+            for item in result["events"]["distribution"]
+        }
+
+        self.assertEqual(distribution["TASK_ASSIGNED"], 2)
+        self.assertEqual(distribution["TASK_STATUS_CHANGED"], 1)
+
+    def test_daily_activity_respects_requested_period(self):
+        from datetime import timedelta
+
+        today = date.today()
+        yesterday = today - timedelta(days=1)
+        outside_period = today - timedelta(days=10)
+
+        self.create_log(event_type="TASK_ASSIGNED")
+        self.WorkflowExecutionLog.objects.filter(
+            event_type="TASK_ASSIGNED"
+        ).update(
+            created_at=timezone.make_aware(
+                datetime.combine(yesterday, datetime.min.time())
+            )
+        )
+
+        self.create_log(event_type="TASK_STATUS_CHANGED")
+        self.WorkflowExecutionLog.objects.filter(
+            event_type="TASK_STATUS_CHANGED"
+        ).update(
+            created_at=timezone.make_aware(
+                datetime.combine(outside_period, datetime.min.time())
+            )
+        )
+
+        result = self.OperationsMetricsService.get_dashboard(
+            as_of=today,
+            days=7,
+        )
+
+        self.assertEqual(
+            sum(item["count"] for item in result["daily_activity"]),
+            1,
+        )
+
+    def test_invalid_period_is_rejected(self):
+        with self.assertRaises(ValueError):
+            self.OperationsMetricsService.get_dashboard(days=0)
+
+class WorkforceMetricsServiceTests(TestCase):
+    """Tests for workforce dashboard metrics."""
+
+    def setUp(self):
+        from employees.services.dashboard.workforce_metrics import (
+            WorkforceMetricsService,
+        )
+
+        self.WorkforceMetricsService = WorkforceMetricsService
+
+        self.department = Department.objects.create(
+            name="Workforce Department",
+            code="WORKFORCE",
+        )
+
+        self.other_department = Department.objects.create(
+            name="Other Department",
+            code="OTHER",
+        )
+
+        self.position = Position.objects.create(
+            title="HR Specialist",
+            department=self.department,
+        )
+
+        self.other_position = Position.objects.create(
+            title="HR Manager",
+            department=self.department,
+        )
+
+        self.admin = User.objects.create_user(
+            email="workforce-admin@example.com",
+            name="Workforce Admin",
+            password="TestPassword123!",
+            role="HR_ADMIN",
+            is_active=True,
+        )
+
+        self.employee_user = User.objects.create_user(
+            email="workforce-employee@example.com",
+            name="Workforce Employee",
+            password="TestPassword123!",
+            role="EMPLOYEE",
+            is_active=True,
+        )
+
+        self.inactive_user = User.objects.create_user(
+            email="workforce-inactive@example.com",
+            name="Inactive Employee",
+            password="TestPassword123!",
+            role="EMPLOYEE",
+            is_active=False,
+        )
+
+        self.employee = EmployeeProfile.objects.create(
+            user=self.employee_user,
+            employee_id="WORK-001",
+            department=self.department,
+            position=self.position,
+            hire_date=date(2026, 10, 5),
+        )
+
+        self.inactive_employee = EmployeeProfile.objects.create(
+            user=self.inactive_user,
+            employee_id="WORK-002",
+            department=self.department,
+            position=self.other_position,
+            hire_date=date(2026, 9, 15),
+        )
+
+    def test_dashboard_returns_total_headcount(self):
+        result = self.WorkforceMetricsService.get_dashboard()
+
+        self.assertEqual(result["headcount"]["total"], 2)
+
+    def test_dashboard_counts_active_and_inactive_accounts(self):
+        result = self.WorkforceMetricsService.get_dashboard()
+
+        self.assertEqual(
+            result["headcount"]["active_accounts"],
+            1,
+        )
+        self.assertEqual(
+            result["headcount"]["inactive_accounts"],
+            1,
+        )
+
+    def test_dashboard_returns_department_distribution(self):
+        result = self.WorkforceMetricsService.get_dashboard()
+
+        self.assertEqual(result["departments"]["total"], 1)
+        self.assertEqual(
+            result["departments"]["distribution"][0][
+                "employee_count"
+            ],
+            2,
+        )
+
+    def test_dashboard_returns_position_distribution(self):
+        result = self.WorkforceMetricsService.get_dashboard()
+
+        self.assertEqual(result["positions"]["total"], 2)
+
+    def test_dashboard_returns_role_distribution(self):
+        result = self.WorkforceMetricsService.get_dashboard()
+
+        roles = {
+            item["user__role"]: item["employee_count"]
+            for item in result["roles"]
+        }
+
+        self.assertEqual(roles["EMPLOYEE"], 2)
+
+    def test_dashboard_counts_monthly_and_yearly_hires(self):
+        result = self.WorkforceMetricsService.get_dashboard(
+            as_of=date(2026, 10, 29),
+        )
+
+        self.assertEqual(result["hires"]["this_month"], 1)
+        self.assertEqual(result["hires"]["this_year"], 2)
+
+    def test_dashboard_department_filter(self):
+        result = self.WorkforceMetricsService.get_dashboard(
+            department_id=self.department.pk,
+        )
+
+        self.assertEqual(result["headcount"]["total"], 2)
+
+    def test_dashboard_excludes_employees_from_other_departments(self):
+        result = self.WorkforceMetricsService.get_dashboard(
+            department_id=self.other_department.pk,
+        )
+
+        self.assertEqual(result["headcount"]["total"], 0)
+        self.assertEqual(result["departments"]["total"], 0)
+
+    def test_dashboard_excludes_users_without_employee_profiles(self):
+        result = self.WorkforceMetricsService.get_dashboard()
+
+        self.assertEqual(result["headcount"]["total"], 2)
+
+class ComplianceMetricsServiceTests(TestCase):
+    """Tests for compliance dashboard metrics."""
+
+    def setUp(self):
+        from employees.services.dashboard.compliance_metrics import (
+            ComplianceMetricsService,
+        )
+
+        self.ComplianceMetricsService = ComplianceMetricsService
+
+        self.department = Department.objects.create(
+            name="Compliance Metrics Department",
+            code="COMPLIANCE-METRICS",
+        )
+
+        self.position = Position.objects.create(
+            title="Compliance Specialist",
+            department=self.department,
+        )
+
+        self.admin = User.objects.create_user(
+            email="compliance-admin@example.com",
+            name="Compliance Admin",
+            password="TestPassword123!",
+            role="HR_ADMIN",
+        )
+
+    def create_employee(self, employee_id, email, **fields):
+        user = User.objects.create_user(
+            email=email,
+            name=f"Employee {employee_id}",
+            password="TestPassword123!",
+            role="EMPLOYEE",
+        )
+
+        return EmployeeProfile.objects.create(
+            user=user,
+            employee_id=employee_id,
+            department=self.department,
+            position=self.position,
+            hire_date=date(2026, 1, 15),
+            **fields,
+        )
+
+    def test_dashboard_returns_zero_metrics_without_employees(self):
+        result = self.ComplianceMetricsService.get_dashboard()
+
+        self.assertEqual(result["headcount"], 0)
+        self.assertEqual(
+            result["profiles"]["completion_rate"],
+            0.0,
+        )
+        self.assertEqual(
+            result["documents"]["compliance_rate"],
+            0.0,
+        )
+
+    def test_dashboard_calculates_profile_completion_rate(self):
+        self.create_employee(
+            "COMP-001",
+            "complete@example.com",
+            phone="4015550100",
+            address="123 Main Street",
+        )
+
+        self.create_employee(
+            "COMP-002",
+            "incomplete@example.com",
+            phone="",
+            address="",
+        )
+
+        result = self.ComplianceMetricsService.get_dashboard()
+
+        self.assertEqual(result["headcount"], 2)
+        self.assertEqual(result["profiles"]["complete"], 1)
+        self.assertEqual(result["profiles"]["incomplete"], 1)
+        self.assertEqual(
+            result["profiles"]["completion_rate"],
+            50.0,
+        )
+
+    def test_dashboard_calculates_document_compliance_rate(self):
+        self.create_employee(
+            "COMP-003",
+            "documents-missing@example.com",
+        )
+
+        result = self.ComplianceMetricsService.get_dashboard()
+
+        self.assertEqual(
+            result["documents"]["compliant_employees"],
+            0,
+        )
+        self.assertEqual(
+            result["documents"]["employees_missing_required_documents"],
+            1,
+        )
+        self.assertEqual(
+            result["documents"]["compliance_rate"],
+            0.0,
+        )
+
+    def test_dashboard_returns_compliance_details(self):
+        self.create_employee(
+            "COMP-004",
+            "details@example.com",
+        )
+
+        result = self.ComplianceMetricsService.get_dashboard()
+
+        self.assertIn(
+            "missing_documents_details",
+            result["documents"],
+        )
+        self.assertIn(
+            "expired_details",
+            result["documents"],
+        )
+        self.assertIn(
+            "expiring_soon_details",
+            result["documents"],
+        )
+
+    def test_dashboard_supports_department_filter(self):
+        self.create_employee(
+            "COMP-005",
+            "department@example.com",
+        )
+
+        result = self.ComplianceMetricsService.get_dashboard(
+            department_id=self.department.pk,
+        )
+
+        self.assertEqual(result["headcount"], 1)
+
+class SecurityMetricsServiceTests(TestCase):
+    """Tests for SOC/SIEM security dashboard metrics."""
+
+    def setUp(self):
+        from accounts.models import SecurityEvent
+        from employees.services.dashboard.security_metrics import (
+            SecurityMetricsService,
+        )
+
+        self.SecurityEvent = SecurityEvent
+        self.SecurityMetricsService = SecurityMetricsService
+
+        self.department_a = Department.objects.create(
+            name="Security Department A",
+            code="SEC-A",
+        )
+        self.department_b = Department.objects.create(
+            name="Security Department B",
+            code="SEC-B",
+        )
+
+        self.position_a = Position.objects.create(
+            title="Security Analyst A",
+            department=self.department_a,
+        )
+        self.position_b = Position.objects.create(
+            title="Security Analyst B",
+            department=self.department_b,
+        )
+
+        self.user = User.objects.create_user(
+            email="security-metrics@example.com",
+            name="Security Metrics User",
+            password="TestPassword123!",
+            is_active=True,
+        )
+
+        self.user_b = User.objects.create_user(
+            email="security-metrics-b@example.com",
+            name="Security Metrics User B",
+            password="TestPassword123!",
+            is_active=True,
+        )
+
+        self.employee_a = EmployeeProfile.objects.create(
+            user=self.user,
+            employee_id="SEC-EMP-001",
+            department=self.department_a,
+            position=self.position_a,
+            hire_date=date.today(),
+        )
+
+        self.employee_b = EmployeeProfile.objects.create(
+            user=self.user_b,
+            employee_id="SEC-EMP-002",
+            department=self.department_b,
+            position=self.position_b,
+            hire_date=date.today(),
+        )
+
+    def create_event(
+        self,
+        *,
+        event_type,
+        ip_address="192.0.2.10",
+        user=None,
+        request_path="/api/test/",
+    ):
+        return self.SecurityEvent.objects.create(
+            user=user,
+            event_type=event_type,
+            ip_address=ip_address,
+            request_path=request_path,
+            user_agent="Security Metrics Test Agent",
+        )
+
+    def test_overview_counts_login_events(self):
+        self.create_event(
+            event_type="LOGIN_SUCCESS",
+            user=self.user,
+        )
+        self.create_event(
+            event_type="LOGIN_FAILED",
+            user=self.user,
+        )
+        self.create_event(
+            event_type="LOGIN_FAILED",
+            user=self.user,
+        )
+
+        result = self.SecurityMetricsService.get_dashboard()
+
+        self.assertEqual(result["overview"]["total_events"], 3)
+        self.assertEqual(result["overview"]["login_success"], 1)
+        self.assertEqual(result["overview"]["login_failed"], 2)
+
+    def test_detection_metrics_count_security_events(self):
+        event_types = [
+            "BRUTE_FORCE_DETECTED",
+            "SUSPICIOUS_IP_DETECTED",
+            "UNAUTHORIZED_ACCESS",
+            "PRIVILEGE_ESCALATION",
+        ]
+
+        for event_type in event_types:
+            self.create_event(event_type=event_type)
+
+        result = self.SecurityMetricsService.get_dashboard()
+
+        self.assertEqual(result["detections"]["brute_force"], 1)
+        self.assertEqual(result["detections"]["suspicious_ip"], 1)
+        self.assertEqual(result["detections"]["unauthorized_access"], 1)
+        self.assertEqual(result["detections"]["privilege_escalation"], 1)
+
+    def test_event_distribution_groups_by_event_type(self):
+        self.create_event(event_type="LOGIN_FAILED")
+        self.create_event(event_type="LOGIN_FAILED")
+        self.create_event(event_type="LOGIN_SUCCESS")
+
+        result = self.SecurityMetricsService.get_dashboard()
+
+        distribution = {
+            item["event_type"]: item["count"]
+            for item in result["events"]["distribution"]
+        }
+
+        self.assertEqual(distribution["LOGIN_FAILED"], 2)
+        self.assertEqual(distribution["LOGIN_SUCCESS"], 1)
+
+    def test_source_metrics_count_distinct_ips_and_users(self):
+        second_user = User.objects.create_user(
+            email="security-second@example.com",
+            name="Second Security User",
+            password="TestPassword123!",
+            is_active=True,
+        )
+
+        self.create_event(
+            event_type="LOGIN_FAILED",
+            ip_address="192.0.2.10",
+            user=self.user,
+        )
+        self.create_event(
+            event_type="LOGIN_FAILED",
+            ip_address="192.0.2.10",
+            user=second_user,
+        )
+        self.create_event(
+            event_type="LOGIN_FAILED",
+            ip_address="192.0.2.20",
+            user=self.user,
+        )
+        self.create_event(
+            event_type="LOGIN_FAILED",
+            ip_address=None,
+            user=None,
+        )
+
+        result = self.SecurityMetricsService.get_dashboard()
+
+        self.assertEqual(result["sources"]["distinct_ips"], 2)
+        self.assertEqual(result["sources"]["distinct_users"], 2)
+
+    def test_recent_events_respect_limit(self):
+        for _ in range(12):
+            self.create_event(event_type="LOGIN_FAILED")
+
+        result = self.SecurityMetricsService.get_dashboard(
+            recent_limit=5,
+        )
+
+        self.assertEqual(len(result["recent_events"]), 5)
+
+        self.assertNotIn(
+            "details",
+            result["recent_events"][0],
+        )
+        self.assertNotIn(
+            "user_agent",
+            result["recent_events"][0],
+        )
+
+    def test_daily_activity_respects_requested_period(self):
+        from datetime import timedelta
+
+        today = date.today()
+        yesterday = today - timedelta(days=1)
+        outside_period = today - timedelta(days=10)
+
+        self.create_event(event_type="LOGIN_FAILED")
+
+        self.SecurityEvent.objects.filter(
+            event_type="LOGIN_FAILED"
+        ).update(
+            created_at=timezone.make_aware(
+                datetime.combine(yesterday, datetime.min.time())
+            )
+        )
+
+        self.create_event(event_type="LOGIN_SUCCESS")
+
+        self.SecurityEvent.objects.filter(
+            event_type="LOGIN_SUCCESS"
+        ).update(
+            created_at=timezone.make_aware(
+                datetime.combine(outside_period, datetime.min.time())
+            )
+        )
+
+        result = self.SecurityMetricsService.get_dashboard(
+            as_of=today,
+            days=7,
+        )
+
+        self.assertEqual(
+            sum(item["count"] for item in result["daily_activity"]),
+            1,
+        )
+    def test_department_filter_excludes_other_department_events(self):
+        self.create_event(
+            event_type="LOGIN_FAILED",
+            user=self.user,
+        )
+        self.create_event(
+            event_type="PRIVILEGE_ESCALATION",
+            user=self.user_b,
+        )
+
+        result = self.SecurityMetricsService.get_dashboard(
+            department_id=self.department_a.id,
+        )
+
+        self.assertEqual(result["overview"]["total_events"], 1)
+        self.assertEqual(result["overview"]["login_failed"], 1)
+        self.assertEqual(result["detections"]["privilege_escalation"], 0)
+
+    def test_department_filter_excludes_events_without_employee_profile(self):
+        self.create_event(
+            event_type="LOGIN_FAILED",
+            user=self.user,
+        )
+        self.create_event(
+            event_type="UNAUTHORIZED_ACCESS",
+            user=None,
+        )
+
+        result = self.SecurityMetricsService.get_dashboard(
+            department_id=self.department_a.id,
+        )
+
+        self.assertEqual(result["overview"]["total_events"], 1)
+        self.assertEqual(result["overview"]["login_failed"], 1)
+        self.assertEqual(result["detections"]["unauthorized_access"], 0)
+    def test_invalid_period_is_rejected(self):
+        with self.assertRaises(ValueError):
+            self.SecurityMetricsService.get_dashboard(days=0)
+
+    def test_invalid_recent_limit_is_rejected(self):
+        with self.assertRaises(ValueError):
+            self.SecurityMetricsService.get_dashboard(
+                recent_limit=0,
+            )
+
+    def test_department_filter_excludes_other_department_events(self):
+        self.create_event(
+            event_type="LOGIN_FAILED",
+            user=self.user,
+        )
+        self.create_event(
+            event_type="PRIVILEGE_ESCALATION",
+            user=self.user_b,
+        )
+
+        result = self.SecurityMetricsService.get_dashboard(
+            department_id=self.department_a.id,
+        )
+
+        self.assertEqual(result["overview"]["total_events"], 1)
+        self.assertEqual(result["overview"]["login_failed"], 1)
+        self.assertEqual(
+            result["detections"]["privilege_escalation"],
+            0,
+        )
+
+    def test_department_filter_excludes_events_without_employee_profile(self):
+        self.create_event(
+            event_type="LOGIN_FAILED",
+            user=self.user,
+        )
+        self.create_event(
+            event_type="UNAUTHORIZED_ACCESS",
+            user=None,
+        )
+
+        result = self.SecurityMetricsService.get_dashboard(
+            department_id=self.department_a.id,
+        )
+
+        self.assertEqual(result["overview"]["total_events"], 1)
+        self.assertEqual(result["overview"]["login_failed"], 1)
+        self.assertEqual(
+            result["detections"]["unauthorized_access"],
+            0,
+        )
+
+class AuditMetricsServiceTests(TestCase):
+    """Tests for consolidated audit dashboard metrics."""
+
+    def setUp(self):
+        from accounts.models import AuditLog
+        from employees.models import (
+            DocumentAccessLog,
+            WorkflowExecutionLog,
+        )
+        from employees.services.dashboard.audit_metrics import (
+            AuditMetricsService,
+        )
+
+        self.AuditLog = AuditLog
+        self.DocumentAccessLog = DocumentAccessLog
+        self.WorkflowExecutionLog = WorkflowExecutionLog
+        self.AuditMetricsService = AuditMetricsService
+
+        self.user = User.objects.create_user(
+            email="audit-metrics@example.com",
+            name="Audit Metrics User",
+            password="TestPassword123!",
+            is_active=True,
+        )
+
+    def create_audit_log(self, action="LOGIN"):
+        return self.AuditLog.objects.create(
+            user=self.user,
+            action=action,
+            details="Audit metrics test",
+        )
+
+    def create_document_log(self, action):
+        return self.DocumentAccessLog.objects.create(
+            user=self.user,
+            action=action,
+            ip_address="192.0.2.10",
+            request_path="/api/v1/employees/hr-documents/",
+            details="Document audit test",
+        )
+
+    def create_workflow_log(self, outcome="SUCCESS"):
+        return self.WorkflowExecutionLog.objects.create(
+            actor=self.user,
+            event_type="TASK_STATUS_CHANGED",
+            outcome=outcome,
+            details={"test": True},
+        )
+
+    def test_overview_counts_all_three_audit_sources(self):
+        self.create_audit_log()
+        self.create_document_log(
+            self.DocumentAccessLog.Action.VIEW
+        )
+        self.create_workflow_log()
+
+        result = self.AuditMetricsService.get_dashboard()
+
+        self.assertEqual(result["overview"]["total_entries"], 3)
+        self.assertEqual(result["overview"]["general_audit_entries"], 1)
+        self.assertEqual(result["overview"]["document_access_entries"], 1)
+        self.assertEqual(result["overview"]["workflow_entries"], 1)
+
+    def test_general_audit_distribution_groups_by_action(self):
+        self.create_audit_log("LOGIN")
+        self.create_audit_log("LOGIN")
+        self.create_audit_log("PASSWORD_CHANGE")
+
+        result = self.AuditMetricsService.get_dashboard()
+
+        distribution = {
+            item["action"]: item["count"]
+            for item in result["general_audit"]["distribution"]
+        }
+
+        self.assertEqual(distribution["LOGIN"], 2)
+        self.assertEqual(distribution["PASSWORD_CHANGE"], 1)
+
+    def test_document_access_distribution_groups_by_action(self):
+        self.create_document_log(
+            self.DocumentAccessLog.Action.VIEW
+        )
+        self.create_document_log(
+            self.DocumentAccessLog.Action.VIEW
+        )
+        self.create_document_log(
+            self.DocumentAccessLog.Action.DOWNLOAD
+        )
+
+        result = self.AuditMetricsService.get_dashboard()
+
+        distribution = {
+            item["action"]: item["count"]
+            for item in result["document_access"]["distribution"]
+        }
+
+        self.assertEqual(distribution["VIEW"], 2)
+        self.assertEqual(distribution["DOWNLOAD"], 1)
+
+    def test_document_access_denied_is_counted(self):
+        self.create_document_log(
+            self.DocumentAccessLog.Action.ACCESS_DENIED
+        )
+        self.create_document_log(
+            self.DocumentAccessLog.Action.VIEW
+        )
+
+        result = self.AuditMetricsService.get_dashboard()
+
+        self.assertEqual(
+            result["document_access"]["access_denied"],
+            1,
+        )
+
+    def test_workflow_distribution_groups_by_event_type(self):
+        self.create_workflow_log("SUCCESS")
+        self.create_workflow_log("FAILURE")
+
+        result = self.AuditMetricsService.get_dashboard()
+
+        distribution = {
+            item["event_type"]: item["count"]
+            for item in result["workflows"]["distribution"]
+        }
+
+        self.assertEqual(distribution["TASK_STATUS_CHANGED"], 2)
+
+    def test_workflow_outcomes_are_counted(self):
+        self.create_workflow_log("SUCCESS")
+        self.create_workflow_log("SUCCESS")
+        self.create_workflow_log("FAILURE")
+        self.create_workflow_log("DENIED")
+
+        result = self.AuditMetricsService.get_dashboard()
+
+        self.assertEqual(result["workflows"]["outcomes"]["SUCCESS"], 2)
+        self.assertEqual(result["workflows"]["outcomes"]["FAILURE"], 1)
+        self.assertEqual(result["workflows"]["outcomes"]["DENIED"], 1)
+
+    def test_recent_events_respect_limit(self):
+        for _ in range(12):
+            self.create_audit_log()
+
+        result = self.AuditMetricsService.get_dashboard(
+            recent_limit=5
+        )
+
+        self.assertEqual(
+            len(result["recent_events"]["general_audit"]),
+            5,
+        )
+
+    def test_daily_activity_contains_each_audit_source(self):
+        self.create_audit_log()
+        self.create_document_log(
+            self.DocumentAccessLog.Action.VIEW
+        )
+        self.create_workflow_log()
+
+        result = self.AuditMetricsService.get_dashboard()
+
+        self.assertEqual(
+            sum(
+                item["count"]
+                for item in result["daily_activity"]["general_audit"]
+            ),
+            1,
+        )
+        self.assertEqual(
+            sum(
+                item["count"]
+                for item in result["daily_activity"]["document_access"]
+            ),
+            1,
+        )
+        self.assertEqual(
+            sum(
+                item["count"]
+                for item in result["daily_activity"]["workflow"]
+            ),
+            1,
+        )
+
+    def test_invalid_period_is_rejected(self):
+        with self.assertRaises(ValueError):
+            self.AuditMetricsService.get_dashboard(days=0)
+
+    def test_invalid_recent_limit_is_rejected(self):
+        with self.assertRaises(ValueError):
+            self.AuditMetricsService.get_dashboard(recent_limit=0)
+
+class RiskMetricsServiceTests(TestCase):
+    """Tests for HR compliance, document and security risk indicators."""
+
+    def setUp(self):
+        from accounts.models import SecurityEvent
+        from employees.models import HRDocument
+        from employees.services.dashboard.risk_metrics import (
+            RiskMetricsService,
+        )
+
+        self.SecurityEvent = SecurityEvent
+        self.HRDocument = HRDocument
+        self.RiskMetricsService = RiskMetricsService
+
+        self.department = Department.objects.create(
+            name="Risk Department",
+            code="RISK",
+        )
+
+        self.position = Position.objects.create(
+            title="Risk Employee",
+            department=self.department,
+        )
+
+        self.user = User.objects.create_user(
+            email="risk@example.com",
+            name="Risk Employee",
+            password="TestPassword123!",
+            is_active=True,
+        )
+
+        self.profile = EmployeeProfile.objects.create(
+            user=self.user,
+            employee_id="RISK-001",
+            department=self.department,
+            position=self.position,
+            hire_date=date(2026, 1, 15),
+        )
+
+    def create_document(self, *, status, document_type=None, suffix="1"):
+        return self.HRDocument.objects.create(
+            employee=self.profile,
+            title=f"Risk Document {suffix}",
+            document_type=(
+                document_type
+                or self.HRDocument.DocumentType.OTHER
+            ),
+            original_filename=f"risk-{suffix}.pdf",
+            storage_key=f"hr-documents/risk/{suffix}.pdf",
+            mime_type="application/pdf",
+            size_bytes=1024,
+            uploaded_by=self.user,
+            status=status,
+        )
+
+    def create_security_event(self, event_type):
+        return self.SecurityEvent.objects.create(
+            user=self.user,
+            event_type=event_type,
+            ip_address="192.0.2.10",
+            request_path="/api/test/",
+            user_agent="Risk Metrics Test Agent",
+        )
+
+    def test_document_lifecycle_counts_statuses(self):
+        self.create_document(
+            status=self.HRDocument.Status.PENDING_SCAN,
+            suffix="1",
+        )
+        self.create_document(
+            status=self.HRDocument.Status.PENDING_REVIEW,
+            suffix="2",
+        )
+        self.create_document(
+            status=self.HRDocument.Status.QUARANTINED,
+            suffix="3",
+        )
+        self.create_document(
+            status=self.HRDocument.Status.REJECTED,
+            suffix="4",
+        )
+        self.create_document(
+            status=self.HRDocument.Status.VERIFIED,
+            suffix="5",
+        )
+        self.create_document(
+            status=self.HRDocument.Status.ARCHIVED,
+            suffix="6",
+        )
+
+        result = self.RiskMetricsService.get_dashboard()
+
+        self.assertEqual(
+            result["document_lifecycle"],
+            {
+                "pending_scan": 1,
+                "pending_review": 1,
+                "quarantined": 1,
+                "rejected": 1,
+                "verified": 1,
+                "archived": 1,
+            },
+        )
+
+    def test_security_detections_are_counted(self):
+        event_types = [
+            "BRUTE_FORCE_DETECTED",
+            "SUSPICIOUS_IP_DETECTED",
+            "UNAUTHORIZED_ACCESS",
+            "PRIVILEGE_ESCALATION",
+        ]
+
+        for event_type in event_types:
+            self.create_security_event(event_type)
+
+        result = self.RiskMetricsService.get_dashboard()
+
+        self.assertEqual(
+            result["security"],
+            {
+                "brute_force": 1,
+                "suspicious_ip": 1,
+                "unauthorized_access": 1,
+                "privilege_escalation": 1,
+            },
+        )
+
+    def test_compliance_risks_are_included(self):
+        result = self.RiskMetricsService.get_dashboard()
+
+        self.assertEqual(
+            result["compliance"]["incomplete_profiles"],
+            1,
+        )
+        self.assertEqual(
+            result["compliance"][
+                "employees_missing_required_documents"
+            ],
+            1,
+        )
+
+    def test_department_filter_applies_to_documents(self):
+        other_department = Department.objects.create(
+            name="Other Risk Department",
+            code="RISK2",
+        )
+
+        other_position = Position.objects.create(
+            title="Other Risk Employee",
+            department=other_department,
+        )
+
+        other_user = User.objects.create_user(
+            email="other-risk@example.com",
+            name="Other Risk Employee",
+            password="TestPassword123!",
+            is_active=True,
+        )
+
+        other_profile = EmployeeProfile.objects.create(
+            user=other_user,
+            employee_id="RISK-002",
+            department=other_department,
+            position=other_position,
+            hire_date=date(2026, 1, 15),
+        )
+
+        self.HRDocument.objects.create(
+            employee=other_profile,
+            title="Other Department Document",
+            document_type=self.HRDocument.DocumentType.OTHER,
+            original_filename="other.pdf",
+            storage_key="hr-documents/risk/other.pdf",
+            mime_type="application/pdf",
+            size_bytes=1024,
+            uploaded_by=other_user,
+            status=self.HRDocument.Status.QUARANTINED,
+        )
+
+        result = self.RiskMetricsService.get_dashboard(
+            department_id=self.department.pk,
+        )
+
+        self.assertEqual(
+            result["document_lifecycle"]["quarantined"],
+            0,
+        )
+
+    def test_dashboard_does_not_generate_artificial_risk_score(self):
+        result = self.RiskMetricsService.get_dashboard()
+
+        self.assertNotIn("risk_score", result)
+        self.assertIn("compliance", result)
+        self.assertIn("document_lifecycle", result)
+        self.assertIn("security", result)
+
+class DashboardServiceTests(TestCase):
+    """Tests for the dashboard orchestration service."""
+
+    def setUp(self):
+        from employees.services.dashboard.dashboard_service import (
+            DashboardService,
+        )
+
+        self.DashboardService = DashboardService
+
+    @patch(
+        "employees.services.dashboard.dashboard_service."
+        "WorkforceMetricsService.get_dashboard"
+    )
+    @patch(
+        "employees.services.dashboard.dashboard_service."
+        "ComplianceMetricsService.get_dashboard"
+    )
+    @patch(
+        "employees.services.dashboard.dashboard_service."
+        "OnboardingMetricsService.get_dashboard"
+    )
+    @patch(
+        "employees.services.dashboard.dashboard_service."
+        "OperationsMetricsService.get_dashboard"
+    )
+    @patch(
+        "employees.services.dashboard.dashboard_service."
+        "SecurityMetricsService.get_dashboard"
+    )
+    @patch(
+        "employees.services.dashboard.dashboard_service."
+        "AuditMetricsService.get_dashboard"
+    )
+    @patch(
+        "employees.services.dashboard.dashboard_service."
+        "RiskMetricsService.get_dashboard"
+    )
+    def test_dashboard_aggregates_all_seven_services(
+        self,
+        risk_mock,
+        audit_mock,
+        security_mock,
+        operations_mock,
+        onboarding_mock,
+        compliance_mock,
+        workforce_mock,
+    ):
+        services = {
+            "workforce": workforce_mock,
+            "compliance": compliance_mock,
+            "onboarding": onboarding_mock,
+            "operations": operations_mock,
+            "security": security_mock,
+            "audit": audit_mock,
+            "risk": risk_mock,
+        }
+
+        for name, service_mock in services.items():
+            service_mock.return_value = {"service": name}
+
+        result = self.DashboardService.get_dashboard()
+
+        self.assertEqual(
+            result,
+            {
+                name: {"service": name}
+                for name in services
+            },
+        )
+
+        for service_mock in services.values():
+            service_mock.assert_called_once()
+
+    @patch(
+        "employees.services.dashboard.dashboard_service."
+        "WorkforceMetricsService.get_dashboard"
+    )
+    @patch(
+        "employees.services.dashboard.dashboard_service."
+        "ComplianceMetricsService.get_dashboard"
+    )
+    @patch(
+        "employees.services.dashboard.dashboard_service."
+        "OnboardingMetricsService.get_dashboard"
+    )
+    @patch(
+        "employees.services.dashboard.dashboard_service."
+        "OperationsMetricsService.get_dashboard"
+    )
+    @patch(
+        "employees.services.dashboard.dashboard_service."
+        "SecurityMetricsService.get_dashboard"
+    )
+    @patch(
+        "employees.services.dashboard.dashboard_service."
+        "AuditMetricsService.get_dashboard"
+    )
+    @patch(
+        "employees.services.dashboard.dashboard_service."
+        "RiskMetricsService.get_dashboard"
+    )
+    def test_dashboard_forwards_parameters_to_services(
+        self,
+        risk_mock,
+        audit_mock,
+        security_mock,
+        operations_mock,
+        onboarding_mock,
+        compliance_mock,
+        workforce_mock,
+    ):
+        from datetime import date
+
+        as_of = date(2026, 10, 30)
+
+        self.DashboardService.get_dashboard(
+            department_id=12,
+            as_of=as_of,
+            days=14,
+            recent_limit=5,
+        )
+
+        for service_mock in (
+            workforce_mock,
+            compliance_mock,
+            onboarding_mock,
+            risk_mock,
+        ):
+            service_mock.assert_called_once_with(
+                department_id=12,
+                as_of=as_of,
+            )
+
+        operations_mock.assert_called_once_with(
+            department_id=12,
+            as_of=as_of,
+            days=14,
+        )
+
+        for service_mock in (security_mock, audit_mock):
+            service_mock.assert_called_once_with(
+                department_id=12,
+                as_of=as_of,
+                days=14,
+                recent_limit=5,
+            )
+
+    @patch(
+        "employees.services.dashboard.dashboard_service."
+        "WorkforceMetricsService.get_dashboard"
+    )
+    def test_dashboard_propagates_service_errors(self, workforce_mock):
+        workforce_mock.side_effect = ValueError("Metrics unavailable")
+
+        with self.assertRaisesMessage(
+            ValueError,
+            "Metrics unavailable",
+        ):
+            self.DashboardService.get_dashboard()
+
+class DashboardFilterSerializerTests(TestCase):
+    """Tests for the HR dashboard filter serializer."""
+
+    def setUp(self):
+        self.department = Department.objects.create(
+            name="Dashboard Engineering",
+            code="DASH-ENG",
+        )
+
+    def test_default_values_are_applied(self):
+        serializer = DashboardFilterSerializer(data={})
+
+        self.assertTrue(serializer.is_valid(), serializer.errors)
+        self.assertEqual(serializer.validated_data["days"], 7)
+        self.assertEqual(serializer.validated_data["recent_limit"], 10)
+
+    def test_existing_department_is_valid(self):
+        serializer = DashboardFilterSerializer(
+            data={"department_id": self.department.pk}
+        )
+
+        self.assertTrue(serializer.is_valid(), serializer.errors)
+        self.assertEqual(
+            serializer.validated_data["department_id"],
+            self.department.pk,
+        )
+
+    def test_nonexistent_department_is_invalid(self):
+        serializer = DashboardFilterSerializer(
+            data={"department_id": 999999}
+        )
+
+        self.assertFalse(serializer.is_valid())
+        self.assertIn("department_id", serializer.errors)
+
+    def test_zero_department_id_is_invalid(self):
+        serializer = DashboardFilterSerializer(
+            data={"department_id": 0}
+        )
+
+        self.assertFalse(serializer.is_valid())
+        self.assertIn("department_id", serializer.errors)
+
+    def test_days_boundaries(self):
+        for value in (1, 365):
+            with self.subTest(days=value):
+                serializer = DashboardFilterSerializer(
+                    data={"days": value}
+                )
+                self.assertTrue(serializer.is_valid(), serializer.errors)
+
+    def test_days_outside_boundaries_are_invalid(self):
+        for value in (0, 366):
+            with self.subTest(days=value):
+                serializer = DashboardFilterSerializer(
+                    data={"days": value}
+                )
+                self.assertFalse(serializer.is_valid())
+                self.assertIn("days", serializer.errors)
+
+    def test_recent_limit_boundaries(self):
+        for value in (1, 100):
+            with self.subTest(recent_limit=value):
+                serializer = DashboardFilterSerializer(
+                    data={"recent_limit": value}
+                )
+                self.assertTrue(serializer.is_valid(), serializer.errors)
+
+    def test_recent_limit_outside_boundaries_is_invalid(self):
+        for value in (0, 101):
+            with self.subTest(recent_limit=value):
+                serializer = DashboardFilterSerializer(
+                    data={"recent_limit": value}
+                )
+                self.assertFalse(serializer.is_valid())
+                self.assertIn("recent_limit", serializer.errors)
+
+    def test_past_reference_date_is_valid(self):
+        past_date = date.today() - timedelta(days=1)
+
+        serializer = DashboardFilterSerializer(
+            data={"as_of": past_date.isoformat()}
+        )
+
+        self.assertTrue(serializer.is_valid(), serializer.errors)
+        self.assertEqual(
+            serializer.validated_data["as_of"],
+            past_date,
+        )
+
+    def test_future_reference_date_is_invalid(self):
+        future_date = date.today() + timedelta(days=1)
+
+        serializer = DashboardFilterSerializer(
+            data={"as_of": future_date.isoformat()}
+        )
+
+        self.assertFalse(serializer.is_valid())
+        self.assertIn("as_of", serializer.errors)
+
+    def test_malformed_reference_date_is_invalid(self):
+        serializer = DashboardFilterSerializer(
+            data={"as_of": "not-a-date"}
+        )
+
+        self.assertFalse(serializer.is_valid())
+        self.assertIn("as_of", serializer.errors)
+
+class DashboardPermissionTests(TestCase):
+    """Unit tests for HR dashboard access permissions."""
+
+    def setUp(self):
+        self.permission = DashboardPermission()
+
+        self.view = type("DashboardView", (), {})()
+
+        self.request = type("Request", (), {})()
+        self.request.method = "GET"
+
+    def make_user(self, role, is_active=True):
+        return User.objects.create_user(
+            email=f"{role.lower()}@dashboard.test",
+            name=f"{role} User",
+            password="TestPassword123!",
+            role=role,
+            is_active=is_active,
+        )
+
+    def test_super_admin_can_access_dashboard(self):
+        self.request.user = self.make_user("SUPER_ADMIN")
+
+        self.assertTrue(
+            self.permission.has_permission(
+                self.request,
+                self.view,
+            )
+        )
+
+    def test_hr_admin_can_access_dashboard(self):
+        self.request.user = self.make_user("HR_ADMIN")
+
+        self.assertTrue(
+            self.permission.has_permission(
+                self.request,
+                self.view,
+            )
+        )
+
+    def test_hr_manager_can_access_dashboard(self):
+        self.request.user = self.make_user("HR_MANAGER")
+
+        self.assertTrue(
+            self.permission.has_permission(
+                self.request,
+                self.view,
+            )
+        )
+
+    def test_employee_cannot_access_dashboard(self):
+        self.request.user = self.make_user("EMPLOYEE")
+
+        self.assertFalse(
+            self.permission.has_permission(
+                self.request,
+                self.view,
+            )
+        )
+
+    def test_inactive_hr_admin_cannot_access_dashboard(self):
+        self.request.user = self.make_user(
+            "HR_ADMIN",
+            is_active=False,
+        )
+
+        self.assertFalse(
+            self.permission.has_permission(
+                self.request,
+                self.view,
+            )
+        )
+
+    def test_unauthenticated_user_cannot_access_dashboard(self):
+        from django.contrib.auth.models import AnonymousUser
+        from rest_framework.test import APIRequestFactory
+
+        self.request = APIRequestFactory().get("/api/dashboard/")
+        self.request.user = AnonymousUser()
+
+        self.assertFalse(
+            self.permission.has_permission(
+                self.request,
+                self.view,
+            )
+        )
+
+
+    def test_post_request_is_denied(self):
+        self.request.user = self.make_user("HR_ADMIN")
+        self.request.method = "POST"
+
+        self.assertFalse(
+            self.permission.has_permission(
+                self.request,
+                self.view,
+            )
+        )
+
+class DashboardAPITests(TestCase):
+    """Tests for the HR dashboard API endpoint."""
+
+    def setUp(self):
+        from django.urls import reverse
+
+        self.client = APIClient()
+        self.dashboard_url = reverse("dashboard")
+
+        self.super_admin = User.objects.create_user(
+            email="dashboard-api-admin@example.com",
+            name="Dashboard Super Admin",
+            password="StrongPassword123!",
+            role="SUPER_ADMIN",
+        )
+
+        self.hr_admin = User.objects.create_user(
+            email="dashboard-api-hr@example.com",
+            name="Dashboard HR Admin",
+            password="StrongPassword123!",
+            role="HR_ADMIN",
+        )
+
+        self.hr_manager = User.objects.create_user(
+            email="dashboard-api-manager@example.com",
+            name="Dashboard HR Manager",
+            password="StrongPassword123!",
+            role="HR_MANAGER",
+        )
+
+        self.employee = User.objects.create_user(
+            email="dashboard-api-employee@example.com",
+            name="Dashboard Employee",
+            password="StrongPassword123!",
+            role="EMPLOYEE",
+        )
+
+        self.inactive_hr_admin = User.objects.create_user(
+            email="dashboard-api-inactive@example.com",
+            name="Inactive Dashboard HR Admin",
+            password="StrongPassword123!",
+            role="HR_ADMIN",
+            is_active=False,
+        )
+
+        self.department = Department.objects.create(
+            name="Dashboard Engineering",
+            code="DASH-ENG",
+        )
+        self.manager_position = Position.objects.create(
+            title="Dashboard HR Manager",
+            department=self.department,
+        )
+
+        self.manager_profile = EmployeeProfile.objects.create(
+            user=self.hr_manager,
+            employee_id="DASH-MANAGER-001",
+            department=self.department,
+            position=self.manager_position,
+            hire_date=date.today(),
+        )
+        self.dashboard_data = {
+            "workforce": {"total_employees": 10},
+            "compliance": {"compliance_rate": 95},
+            "onboarding": {"active_journeys": 3},
+            "operations": {"pending_leave_requests": 2},
+            "security": {"security_events": 1},
+            "audit": {"recent_events": []},
+            "risk": {"risk_level": "LOW"},
+        }
+
+    def test_hr_roles_can_access_dashboard(self):
+        """All authorized HR roles can access the dashboard."""
+
+        authorized_users = (
+            self.super_admin,
+            self.hr_admin,
+            self.hr_manager,
+        )
+
+        for user in authorized_users:
+            with self.subTest(role=user.role):
+                self.client.force_authenticate(user=user)
+
+                with patch(
+                    "employees.views.DashboardService.get_dashboard",
+                    return_value=self.dashboard_data,
+                ):
+                    response = self.client.get(self.dashboard_url)
+
+                self.assertEqual(
+                    response.status_code,
+                    status.HTTP_200_OK,
+                )
+
+        self.client.force_authenticate(user=None)
+
+    def test_dashboard_returns_expected_json_structure(self):
+        """The endpoint returns aggregated dashboard data."""
+
+        self.client.force_authenticate(user=self.hr_admin)
+
+        with patch(
+            "employees.views.DashboardService.get_dashboard",
+            return_value=self.dashboard_data,
+        ) as mock_service:
+            response = self.client.get(self.dashboard_url)
+
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_200_OK,
+        )
+
+        self.assertEqual(
+            response.data,
+            self.dashboard_data,
+        )
+
+        mock_service.assert_called_once_with(
+            days=7,
+            recent_limit=10,
+        )
+
+    def test_dashboard_forwards_valid_filters_to_service(self):
+        """Validated query parameters are forwarded to DashboardService."""
+
+        self.client.force_authenticate(user=self.hr_admin)
+
+        reference_date = date.today() - timedelta(days=1)
+
+        params = {
+            "department_id": self.department.pk,
+            "as_of": reference_date.isoformat(),
+            "days": 30,
+            "recent_limit": 25,
+        }
+
+        with patch(
+            "employees.views.DashboardService.get_dashboard",
+            return_value=self.dashboard_data,
+        ) as mock_service:
+            response = self.client.get(
+                self.dashboard_url,
+                params,
+            )
+
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_200_OK,
+        )
+
+        mock_service.assert_called_once_with(
+            department_id=self.department.pk,
+            as_of=reference_date,
+            days=30,
+            recent_limit=25,
+        )
+
+    def test_invalid_filters_return_400(self):
+        """Invalid filters are rejected before service execution."""
+
+        self.client.force_authenticate(user=self.hr_admin)
+
+        with patch(
+            "employees.views.DashboardService.get_dashboard",
+        ) as mock_service:
+            response = self.client.get(
+                self.dashboard_url,
+                {"days": 0},
+            )
+
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_400_BAD_REQUEST,
+        )
+
+        mock_service.assert_not_called()
+
+    def test_nonexistent_department_returns_400(self):
+        """A nonexistent department cannot be used as a filter."""
+
+        self.client.force_authenticate(user=self.hr_admin)
+
+        with patch(
+            "employees.views.DashboardService.get_dashboard",
+        ) as mock_service:
+            response = self.client.get(
+                self.dashboard_url,
+                {"department_id": 999999},
+            )
+
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_400_BAD_REQUEST,
+        )
+
+        mock_service.assert_not_called()
+
+    def test_employee_cannot_access_dashboard(self):
+        """Employees are denied access to the HR dashboard."""
+
+        self.client.force_authenticate(user=self.employee)
+
+        with patch(
+            "employees.views.DashboardService.get_dashboard",
+        ) as mock_service:
+            response = self.client.get(self.dashboard_url)
+
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_403_FORBIDDEN,
+        )
+
+        mock_service.assert_not_called()
+
+    def test_inactive_hr_user_cannot_access_dashboard(self):
+        """Inactive HR users are denied access."""
+
+        self.client.force_authenticate(
+            user=self.inactive_hr_admin,
+        )
+
+        with patch(
+            "employees.views.DashboardService.get_dashboard",
+        ) as mock_service:
+            response = self.client.get(self.dashboard_url)
+
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_403_FORBIDDEN,
+        )
+
+        mock_service.assert_not_called()
+
+    def test_unauthenticated_user_cannot_access_dashboard(self):
+        """Unauthenticated requests cannot access the dashboard."""
+
+        with patch(
+            "employees.views.DashboardService.get_dashboard",
+        ) as mock_service:
+            response = self.client.get(self.dashboard_url)
+
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_401_UNAUTHORIZED,
+        )
+
+        mock_service.assert_not_called()
+
+
+    def test_hr_manager_is_restricted_to_own_department(self):
+        """HR managers automatically use their assigned department."""
+
+        self.client.force_authenticate(user=self.hr_manager)
+
+        with patch(
+            "employees.views.DashboardService.get_dashboard",
+            return_value=self.dashboard_data,
+        ) as mock_service:
+            response = self.client.get(self.dashboard_url)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+        mock_service.assert_called_once_with(
+            department_id=self.department.pk,
+            days=7,
+            recent_limit=10,
+        )
+
+    def test_hr_manager_can_explicitly_request_own_department(self):
+        """HR managers can explicitly select their own department."""
+
+        self.client.force_authenticate(user=self.hr_manager)
+
+        with patch(
+            "employees.views.DashboardService.get_dashboard",
+            return_value=self.dashboard_data,
+        ) as mock_service:
+            response = self.client.get(
+                self.dashboard_url,
+                {"department_id": self.department.pk},
+            )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+        mock_service.assert_called_once_with(
+            department_id=self.department.pk,
+            days=7,
+            recent_limit=10,
+        )
+
+    def test_hr_manager_cannot_access_another_department(self):
+        """HR managers cannot access another department's data."""
+
+        another_department = Department.objects.create(
+            name="Dashboard Finance",
+            code="DASH-FIN",
+        )
+
+        self.client.force_authenticate(user=self.hr_manager)
+
+        with patch(
+            "employees.views.DashboardService.get_dashboard",
+        ) as mock_service:
+            response = self.client.get(
+                self.dashboard_url,
+                {"department_id": another_department.pk},
+            )
+
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_403_FORBIDDEN,
+        )
+
+        mock_service.assert_not_called()
+
+    def test_hr_manager_without_profile_is_denied(self):
+        """HR managers without an employee profile are denied."""
+
+        manager_without_profile = User.objects.create_user(
+            email="dashboard-manager-no-profile@example.com",
+            name="Manager Without Profile",
+            password="StrongPassword123!",
+            role="HR_MANAGER",
+        )
+
+        self.client.force_authenticate(
+            user=manager_without_profile,
+        )
+
+        with patch(
+            "employees.views.DashboardService.get_dashboard",
+        ) as mock_service:
+            response = self.client.get(self.dashboard_url)
+
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_403_FORBIDDEN,
+        )
+
+        mock_service.assert_not_called()

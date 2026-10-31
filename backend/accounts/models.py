@@ -132,6 +132,9 @@ class AuditLog(models.Model):
         ("ACCOUNT_DEACTIVATED", "Account Deactivated"),
         ("ACCOUNT_CHANGE", "Account Change"),
         ("UNAUTHORIZED_ACCESS", "Unauthorized Access"),
+        ("HR_DOCUMENT_VERIFIED", "HR Document Verified"),
+        ("HR_DOCUMENT_REJECTED", "HR Document Rejected"),
+        ("HR_DOCUMENT_ARCHIVED", "HR Document Archived"),
     )
 
     user = models.ForeignKey(
@@ -180,6 +183,9 @@ class SecurityEvent(models.Model):
         ("LEAVE_REQUEST_APPROVED", "Leave Request Approved"),
         ("LEAVE_REQUEST_REJECTED", "Leave Request Rejected"),
         ("LEAVE_REQUEST_CANCELLED", "Leave Request Cancelled"),
+        ("HR_DOCUMENT_VERIFIED", "HR Document Verified"),
+        ("HR_DOCUMENT_REJECTED", "HR Document Rejected"),
+        ("HR_DOCUMENT_ARCHIVED", "HR Document Archived"),
     )
 
     user = models.ForeignKey(

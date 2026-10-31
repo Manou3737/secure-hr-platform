@@ -1,10 +1,15 @@
 from rest_framework.routers import DefaultRouter
-
+from django.urls import path
 from .views import (
     EmployeeProfileViewSet,
     LeaveRequestViewSet,
     BankAccountViewSet,
     PerformanceReviewViewSet,
+    HRDocumentViewSet,
+    OnboardingJourneyViewSet,
+    OnboardingTaskViewSet,
+    DocumentAccessLogViewSet,
+    DashboardView,
 )
 
 
@@ -21,15 +26,39 @@ router.register(
      basename="performance-review"
 )
 router.register(
+    "hr-documents",
+    HRDocumentViewSet,
+    basename="hr-document",
+)
+router.register(
     "leave-requests",
     LeaveRequestViewSet,
     basename="leave-request",
 )
-
+router.register(
+    "document-access-logs",
+    DocumentAccessLogViewSet,
+    basename="document-access-log",
+)
 router.register(
     "",
     EmployeeProfileViewSet,
     basename="employee",
 )
-
-urlpatterns = router.urls
+router.register(
+    "onboarding/journeys",
+    OnboardingJourneyViewSet,
+    basename="onboarding-journey",
+)
+router.register(
+    "onboarding/tasks",
+    OnboardingTaskViewSet,
+    basename="onboarding-task",
+)
+urlpatterns = [
+    path(
+        "dashboard/",
+        DashboardView.as_view(),
+        name="dashboard",
+    ),
+] + router.urls

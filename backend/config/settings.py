@@ -11,11 +11,13 @@ https://docs.djangoproject.com/en/6.1/ref/settings/
 """
 import os
 from pathlib import Path
+from dotenv import load_dotenv
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
 
-
+# Load environment variables from the repository root .env file.
+load_dotenv(BASE_DIR.parent / ".env")
 # Quick-start development settings - unsuitable for production
 # See https://docs.djangoproject.com/en/6.1/howto/deployment/checklist/
 
@@ -166,4 +168,70 @@ REST_FRAMEWORK = {
         "rest_framework.permissions.IsAuthenticated",
     ),
     "DEFAULT_SCHEMA_CLASS": "drf_spectacular.openapi.AutoSchema",
+    "DEFAULT_PAGINATION_CLASS": ( "config.pagination.StandardResultsSetPagination" ),
 }
+SPECTACULAR_SETTINGS = {
+    "TITLE": "Secure HR Platform API",
+    "DESCRIPTION": (
+        "Secure Human Resources Platform API for employee management, "
+        "HR operations, and security-conscious access to sensitive data."
+    ),
+    "VERSION": "1.0.0",
+    "SERVE_INCLUDE_SCHEMA": False,
+}
+# Private HR document storage
+AWS_STORAGE_BUCKET_NAME = os.environ.get(
+    "AWS_STORAGE_BUCKET_NAME", ""
+).strip()
+
+if AWS_STORAGE_BUCKET_NAME:
+    INSTALLED_APPS += ["storages"]
+
+    STORAGES = {
+        "default": {
+            "BACKEND": "storages.backends.s3.S3Storage",
+            "OPTIONS": {
+                "bucket_name": AWS_STORAGE_BUCKET_NAME,
+                "region_name": os.environ.get(
+                    "AWS_S3_REGION_NAME", "us-east-1"
+                ),
+                "endpoint_url": (
+                    os.environ.get("AWS_S3_ENDPOINT_URL") or None
+                ),
+                "access_key": (
+                    os.environ.get("AWS_ACCESS_KEY_ID") or None
+                ),
+                "secret_key": (
+                    os.environ.get("AWS_SECRET_ACCESS_KEY") or None
+                ),
+                "default_acl": None,
+                "querystring_auth": True,
+                "querystring_expire": 300,
+                "file_overwrite": False,
+                "object_parameters": {
+                    "CacheControl": "no-store",
+                },
+            },
+        },
+        "staticfiles": {
+            "BACKEND": (
+                "django.contrib.staticfiles.storage.StaticFilesStorage"
+            ),
+        },
+    }
+else:
+    MEDIA_ROOT = BASE_DIR / "media"
+    MEDIA_URL = "/media/"
+
+    STORAGES = {
+        "default": {
+            "BACKEND": (
+                "django.core.files.storage.FileSystemStorage"
+            ),
+        },
+        "staticfiles": {
+            "BACKEND": (
+                "django.contrib.staticfiles.storage.StaticFilesStorage"
+            ),
+        },
+    }
