@@ -78,7 +78,10 @@ class EmployeeProfileSerializer(serializers.ModelSerializer):
 
 class LeaveRequestSerializer(serializers.ModelSerializer):
     """Serialize employee leave requests."""
-
+    employee = serializers.PrimaryKeyRelatedField(
+        queryset=EmployeeProfile.objects.all(),
+        required=True,
+    )
     class Meta:
         model = LeaveRequest
         fields = (
@@ -96,7 +99,6 @@ class LeaveRequestSerializer(serializers.ModelSerializer):
         )
         read_only_fields = (
             "id",
-            "employee",
             "status",
             "reviewed_by",
             "reviewed_at",
