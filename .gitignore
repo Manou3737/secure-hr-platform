@@ -42,3 +42,10 @@ docker-compose.override.yml
 
 # Local project data
 logs/
+# Sensitive HR documents - local private storage
+/backend/private_hr_documents/
+
+# Local database backups - may contain sensitive data
+*.dump
+*.sql
+*.bak

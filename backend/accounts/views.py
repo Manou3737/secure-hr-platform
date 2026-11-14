@@ -38,6 +38,7 @@ from drf_spectacular.utils import (
     extend_schema,
     inline_serializer,
 )
+from .tokens import email_verification_token_generator
 
 class LoginRateThrottle(AnonRateThrottle):
     """Limit anonymous login attempts."""
@@ -51,6 +52,7 @@ class UserRegistrationViewSet(viewsets.ViewSet):
     serializer_class = serializers.UserRegistrationSerializer
     permission_classes = (AllowAny,)
 
+
     def create(self, request):
         serializer = self.serializer_class(
             data=request.data
@@ -62,15 +64,48 @@ class UserRegistrationViewSet(viewsets.ViewSet):
 
         user = serializer.save()
 
+        uid = urlsafe_base64_encode(
+            force_bytes(user.pk)
+        )
+
+        token = email_verification_token_generator.make_token(
+            user
+        )
+
+        verification_url = request.build_absolute_uri(
+            "/api/v1/auth/verify-email/"
+            f"?uid={uid}&token={token}"
+        )
+
+        send_mail(
+            subject="Secure HR Platform - Verify your email",
+            message=(
+                "Welcome to Secure HR Platform.\n\n"
+                "Please verify your email address using "
+                "the following link:\n\n"
+                f"{verification_url}\n\n"
+                "If you did not create this account, "
+                "you can ignore this email."
+            ),
+            from_email=None,
+            recipient_list=[user.email],
+            fail_silently=False,
+        )
+
         return Response(
             {
                 "id": user.id,
                 "email": user.email,
                 "name": user.name,
                 "email_verified": user.email_verified,
+                "detail": (
+                    "Account created. Please check your email "
+                    "to verify your address."
+                ),
             },
             status=status.HTTP_201_CREATED,
         )
+
 
 
 class EmailVerificationViewSet(viewsets.ViewSet):
@@ -158,7 +193,7 @@ class EmailVerificationViewSet(viewsets.ViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        if not default_token_generator.check_token(
+        if not email_verification_token_generator.check_token(
             user,
             token,
         ):
@@ -772,10 +807,7 @@ class PrivilegeManagementViewSet(viewsets.ViewSet):
                 request=request,
                 user=request.user,
                 event_type="PRIVILEGE_ESCALATION",
-                details=(
-                    f"Administrative privileges escalated "
-                    f"for user {user.email}: {changes}"
-                ),
+                details="Administrative privileges escalated for a user.",
             )
 
         return Response(

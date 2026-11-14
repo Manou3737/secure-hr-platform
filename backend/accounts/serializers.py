@@ -38,7 +38,7 @@ class UserRegistrationSerializer(serializers.ModelSerializer):
         if attrs["password"] != attrs["password_confirm"]:
             raise serializers.ValidationError(
                 {
-                    "password_confirm": "Passwords do not match.",
+                    "password_confirm": "Passwords do not match.", # nosec B105
                 }
             )
 
@@ -100,7 +100,11 @@ class AuthTokenSerializer(serializers.Serializer):
                     "This account is inactive.",
                     code="authorization",
                 )
-
+            if not user.email_verified:
+                raise serializers.ValidationError(
+                    "Please verify your email address before logging in.",
+                    code="authorization",
+                )
         else:
             raise serializers.ValidationError(
                 "Must include 'email' and 'password'."
@@ -140,14 +144,14 @@ class PasswordChangeSerializer(serializers.Serializer):
         if not user.check_password(attrs["old_password"]):
             raise serializers.ValidationError(
                 {
-                    "old_password": "Current password is incorrect.",
+                    "old_password": "Current password is incorrect.", # nosec B105
                 }
             )
 
         if attrs["new_password"] != attrs["new_password_confirm"]:
             raise serializers.ValidationError(
                 {
-                    "new_password_confirm": "Passwords do not match.",
+                    "new_password_confirm": "Passwords do not match.", # nosec B105
                 }
             )
 
@@ -179,11 +183,11 @@ class PasswordChangeSerializer(serializers.Serializer):
         )
 
         return user
+
 class PasswordResetRequestSerializer(serializers.Serializer):
     """Validate an email address for a password reset request."""
 
     email = serializers.EmailField()
-
 
 class PasswordResetConfirmSerializer(serializers.Serializer):
     """Validate a password reset using a valid UID and token."""
@@ -210,7 +214,7 @@ class PasswordResetConfirmSerializer(serializers.Serializer):
         if attrs["new_password"] != attrs["new_password_confirm"]:
             raise serializers.ValidationError(
                 {
-                    "new_password_confirm": "Passwords do not match.",
+                    "new_password_confirm": "Passwords do not match.", # nosec B105
                 }
             )
 
@@ -231,7 +235,7 @@ class PasswordResetConfirmSerializer(serializers.Serializer):
         ):
             raise serializers.ValidationError(
                 {
-                    "token": "Invalid or expired password reset token.",
+                    "token": "Invalid or expired password reset token.", # nosec B105
                 }
             )
 
@@ -266,7 +270,6 @@ class PasswordResetConfirmSerializer(serializers.Serializer):
 
         return user
 
-
 class UserAccountSerializer(serializers.ModelSerializer):
     """Serializer for displaying a user's HR account information."""
 
@@ -286,12 +289,10 @@ class UserAccountSerializer(serializers.ModelSerializer):
             "is_active",
         )
 
-
 class AccountStatusSerializer(serializers.Serializer):
     """Serializer for activating or deactivating a user account."""
 
     is_active = serializers.BooleanField()
-
 
 class UserPrivilegeSerializer(serializers.Serializer):
     """Serializer for managing administrative privileges."""

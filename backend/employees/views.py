@@ -18,7 +18,13 @@ from rest_framework.views import APIView
 
 from accounts.models import AuditLog
 from accounts.siem import create_security_event
-
+from drf_spectacular.types import OpenApiTypes
+from drf_spectacular.utils import (
+    extend_schema,
+    extend_schema_view,
+    OpenApiParameter,
+    OpenApiResponse,
+)
 from employees.permissions import (
     HRDocumentDownloadPermission,
     HRDocumentPermission,
@@ -73,6 +79,7 @@ from .serializers import (
     OnboardingTaskAssignmentSerializer,
     OnboardingTaskTransitionSerializer,
     DashboardFilterSerializer,
+    DashboardResponseSerializer,
 )
 from employees.services.document_access import DocumentAccessService
 from employees.services.dashboard.dashboard_service import DashboardService
@@ -177,16 +184,16 @@ class EmployeeProfileViewSet(viewsets.ModelViewSet):
 
         user = self.request.user
 
+        queryset = EmployeeProfile.objects.all()
+
         if (
             user.is_authenticated
             and user.role == "EMPLOYEE"
             and self.action == "list"
         ):
-            return EmployeeProfile.objects.filter(
-                user=user
-            )
+            queryset = queryset.filter(user=user)
 
-        return EmployeeProfile.objects.all()
+        return queryset.order_by("-created_at", "-id")
 
 class LeaveRequestViewSet(viewsets.ModelViewSet):
     """API endpoint for managing employee leave requests."""
@@ -255,33 +262,74 @@ class LeaveRequestViewSet(viewsets.ModelViewSet):
         )
 
     def get_queryset(self):
-        """Restrict employees to their own leave requests."""
+        """Restrict leave requests according to user role and department."""
 
+        if getattr(self, "swagger_fake_view", False):
+            return LeaveRequest.objects.none()
         user = self.request.user
 
         queryset = LeaveRequest.objects.select_related(
             "employee",
             "employee__user",
+            "employee__department",
             "reviewed_by",
-        )
+        ).order_by("-created_at", "-id")
 
-        if (
-            user.is_authenticated
-            and user.role == "EMPLOYEE"
-        ):
+        if user.role == "EMPLOYEE":
             return queryset.filter(
                 employee__user=user
             )
 
+        if user.role == "HR_MANAGER":
+            try:
+                manager_profile = user.employee_profile
+            except EmployeeProfile.DoesNotExist:
+                raise DRFPermissionDenied(
+                    "An employee profile is required for HR managers."
+                )
+
+            return queryset.filter(
+                employee__department_id=manager_profile.department_id
+            )
+
+        # HR_ADMIN and SUPER_ADMIN retain global access.
         return queryset
+
+    def create(self, request, *args, **kwargs):
+        """Reject employees without profiles before serializer validation."""
+
+        if request.user.role == "EMPLOYEE":
+            if not EmployeeProfile.objects.filter(
+                user=request.user
+            ).exists():
+                self.permission_denied(
+                    request,
+                    message=(
+                        "An employee profile is required to submit "
+                        "a leave request."
+                    ),
+                )
+
+        return super().create(
+            request,
+            *args,
+            **kwargs,
+        )
+
 
     def perform_create(self, serializer):
         """Create a leave request and record the event."""
 
         if self.request.user.role == "EMPLOYEE":
-            employee = EmployeeProfile.objects.get(
-                user=self.request.user
-            )
+            try:
+                employee = EmployeeProfile.objects.get(
+                    user=self.request.user
+                )
+            except EmployeeProfile.DoesNotExist:
+                raise DRFPermissionDenied(
+                    "An employee profile is required to submit "
+                    "a leave request."
+                )
 
             leave_request = serializer.save(
                 employee=employee
@@ -307,6 +355,7 @@ class LeaveRequestViewSet(viewsets.ModelViewSet):
                 f"for {leave_request.employee.employee_id}."
             ),
         )
+
 
     @action(
         detail=True,
@@ -456,7 +505,7 @@ class BankAccountViewSet(viewsets.ModelViewSet):
     queryset = BankAccount.objects.select_related(
         "employee",
         "employee__user",
-    ).all()
+    ).order_by("-created_at", "-id")
 
     serializer_class = BankAccountSerializer
     permission_classes = (
@@ -480,13 +529,33 @@ class BankAccountViewSet(viewsets.ModelViewSet):
         "last_four",
     )
     def get_queryset(self):
-        """Limit employees to their own bank accounts."""
+        """Limit bank account access by employee role and department."""
 
         queryset = super().get_queryset()
+        user = self.request.user
 
-        if self.request.user.role == "EMPLOYEE":
+        if user.role == "EMPLOYEE":
             queryset = queryset.filter(
-                employee__user=self.request.user,
+                employee__user=user,
+            )
+
+        elif user.role == "HR_MANAGER":
+            try:
+                manager_department_id = (
+                    user.employee_profile.department_id
+                )
+            except EmployeeProfile.DoesNotExist:
+                raise DRFPermissionDenied(
+                    "An employee profile is required."
+                )
+
+            if manager_department_id is None:
+                raise DRFPermissionDenied(
+                    "A department is required."
+                )
+
+            queryset = queryset.filter(
+                employee__department_id=manager_department_id,
             )
 
         return queryset
@@ -595,7 +664,7 @@ class PerformanceReviewViewSet(viewsets.ModelViewSet):
         "employee",
         "employee__user",
         "reviewer",
-    ).all()
+    ).order_by("-created_at", "-id")
 
     serializer_class = PerformanceReviewSerializer
     permission_classes = (
@@ -1226,7 +1295,18 @@ class HRDocumentViewSet(
             self.get_serializer(document).data,
             status=status.HTTP_200_OK,
         )
-
+@extend_schema_view(
+    retrieve=extend_schema(
+        parameters=[
+            OpenApiParameter(
+                name="id",
+                type=OpenApiTypes.UUID,
+                location=OpenApiParameter.PATH,
+                required=True,
+            ),
+        ],
+    ),
+)
 class OnboardingJourneyViewSet(viewsets.ReadOnlyModelViewSet):
     """Expose onboarding journeys with role-based queryset filtering."""
 
@@ -1251,7 +1331,38 @@ class OnboardingJourneyViewSet(viewsets.ReadOnlyModelViewSet):
             return queryset.filter(employee__user_id=user.pk)
 
         return queryset.none()
-
+@extend_schema_view(
+    retrieve=extend_schema(
+        parameters=[
+            OpenApiParameter(
+                name="id",
+                type=OpenApiTypes.UUID,
+                location=OpenApiParameter.PATH,
+                required=True,
+            ),
+        ],
+    ),
+    assign=extend_schema(
+        parameters=[
+            OpenApiParameter(
+                name="id",
+                type=OpenApiTypes.UUID,
+                location=OpenApiParameter.PATH,
+                required=True,
+            ),
+        ],
+    ),
+    transition=extend_schema(
+        parameters=[
+            OpenApiParameter(
+                name="id",
+                type=OpenApiTypes.UUID,
+                location=OpenApiParameter.PATH,
+                required=True,
+            ),
+        ],
+    ),
+)
 class OnboardingTaskViewSet(viewsets.GenericViewSet):
     """Expose onboarding tasks and controlled workflow operations."""
 
@@ -1373,12 +1484,14 @@ class OnboardingTaskViewSet(viewsets.GenericViewSet):
             status=status.HTTP_200_OK,
         )
 
+
 class DocumentAccessLogViewSet(viewsets.ReadOnlyModelViewSet):
     """Read-only API for authorized HR staff to inspect document audit logs."""
 
     queryset = DocumentAccessLog.objects.select_related(
         "user",
         "document",
+        "document__employee",
     ).all()
 
     serializer_class = DocumentAccessLogSerializer
@@ -1405,6 +1518,35 @@ class DocumentAccessLogViewSet(viewsets.ReadOnlyModelViewSet):
     )
     ordering = ("-created_at",)
 
+    def get_queryset(self):
+        """Restrict HR managers to their own department's document logs."""
+
+        queryset = super().get_queryset()
+        user = self.request.user
+
+        if user.role == "HR_MANAGER":
+            try:
+                manager_profile = user.employee_profile
+            except EmployeeProfile.DoesNotExist:
+                raise DRFPermissionDenied(
+                    "An employee profile is required for HR managers."
+                )
+
+            if manager_profile.department_id is None:
+                raise DRFPermissionDenied(
+                    "A department is required for HR managers."
+                )
+
+            queryset = queryset.filter(
+                document__employee__department_id=(
+                    manager_profile.department_id
+                )
+            )
+
+        # HR_ADMIN and SUPER_ADMIN retain global access.
+        return queryset
+
+
 class DashboardView(APIView):
     """
     Read-only API endpoint for aggregated HR dashboard metrics.
@@ -1415,6 +1557,64 @@ class DashboardView(APIView):
 
     permission_classes = (DashboardPermission,)
 
+    @extend_schema(
+        operation_id="employees_dashboard_retrieve",
+        summary="Retrieve HR dashboard metrics",
+        description=(
+            "Returns aggregated HR dashboard metrics across workforce, "
+            "compliance, onboarding, operations, security, audit, risk, "
+            "and recruitment. Recruitment metrics include job posting "
+            "and application status distributions, applications received, "
+            "hires during the selected period, and daily application activity. "
+            "No candidate personal information is exposed. "
+            "SUPER_ADMIN and HR_ADMIN users can access global data or filter "
+            "by department. HR_MANAGER users are restricted to their own "
+            "department. An HR_MANAGER cannot request another department."
+        ),
+        parameters=[
+            OpenApiParameter(
+                name="department_id",
+                type=int,
+                location=OpenApiParameter.QUERY,
+                required=False,
+                description="Filter dashboard metrics by department ID.",
+            ),
+            OpenApiParameter(
+                name="as_of",
+                type=OpenApiTypes.DATE,
+                location=OpenApiParameter.QUERY,
+                required=False,
+                description="Reference date in YYYY-MM-DD format. Future dates are rejected.",
+            ),
+            OpenApiParameter(
+                name="days",
+                type=int,
+                location=OpenApiParameter.QUERY,
+                required=False,
+                description="Analysis period in days (1–365). Defaults to 7.",
+            ),
+            OpenApiParameter(
+                name="recent_limit",
+                type=int,
+                location=OpenApiParameter.QUERY,
+                required=False,
+                description="Maximum number of recent records (1–100). Defaults to 10.",
+            ),
+        ],
+        responses={
+            200: DashboardResponseSerializer,
+            400: OpenApiResponse(
+                description="Invalid query parameters.",
+            ),
+            401: OpenApiResponse(
+                description="Authentication credentials were not provided or are invalid.",
+            ),
+            403: OpenApiResponse(
+                description="The user does not have dashboard access or requested a forbidden department.",
+            ),
+        },
+        tags=["HR Dashboard"],
+    )
     def get(self, request):
         """
         Validate filters, enforce department scope,
@@ -1430,10 +1630,16 @@ class DashboardView(APIView):
 
         if request.user.role == "HR_MANAGER":
             try:
-                manager_department_id = (
-                    request.user.employee_profile.department_id
-                )
+                manager_profile = request.user.employee_profile
             except EmployeeProfile.DoesNotExist:
+                raise DRFPermissionDenied(
+                    "HR managers must have an employee profile "
+                    "with an assigned department."
+                )
+
+            manager_department_id = manager_profile.department_id
+
+            if manager_department_id is None:
                 raise DRFPermissionDenied(
                     "HR managers must have an employee profile "
                     "with an assigned department."
@@ -1457,6 +1663,15 @@ class DashboardView(APIView):
         dashboard_data = DashboardService.get_dashboard(
             **dashboard_filters
         )
+
+        # HR managers can view aggregated security metrics,
+        # but not individual IP addresses or request paths.
+        if request.user.role == "HR_MANAGER":
+            security_metrics = dashboard_data.get("security", {})
+
+            for event in security_metrics.get("recent_events", []):
+                event["ip_address"] = None
+                event["request_path"] = ""
 
         return Response(
             dashboard_data,

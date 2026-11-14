@@ -127,6 +127,8 @@ class DocumentVersionService:
         raise PermissionDenied(
             "You are not allowed to access this document."
         )
+
+
     @classmethod
     def create_version(cls, *, document_id, uploaded_file, actor):
         """
@@ -135,15 +137,6 @@ class DocumentVersionService:
         This method does not approve the parent document or grant download
         access. The parent document's current file is not replaced here.
         """
-        filename, extension, size = cls._validate_file(uploaded_file)
-
-        digest = hashlib.sha256()
-        uploaded_file.seek(0)
-        for chunk in uploaded_file.chunks():
-            digest.update(chunk)
-        checksum = digest.hexdigest()
-        uploaded_file.seek(0)
-
         with transaction.atomic():
             document = (
                 HRDocument.objects.select_for_update()
@@ -154,13 +147,33 @@ class DocumentVersionService:
                 HRDocument.Status.QUARANTINED,
                 HRDocument.Status.ARCHIVED,
             }:
-                cls._authorize_archived_or_quarantined(actor, document)
+                cls._authorize_archived_or_quarantined(
+                    actor,
+                    document,
+                )
                 raise ValidationError(
                     "Archived or quarantined documents cannot be versioned."
                 )
 
+            # Authorization must happen before file processing.
             cls._authorize(actor, document)
 
+            # Validate the file only after authorization.
+            filename, extension, size = cls._validate_file(
+                uploaded_file
+            )
+
+            # Calculate the checksum after validation.
+            digest = hashlib.sha256()
+            uploaded_file.seek(0)
+
+            for chunk in uploaded_file.chunks():
+                digest.update(chunk)
+
+            checksum = digest.hexdigest()
+            uploaded_file.seek(0)
+
+            # Scan the file before storing it.
             try:
                 scan_uploaded_file(uploaded_file)
             except MalwareDetected as exc:
@@ -179,6 +192,7 @@ class DocumentVersionService:
                 .order_by("-version_number")
                 .first()
             )
+
             version_number = (
                 latest.version_number + 1 if latest else 1
             )
@@ -189,6 +203,7 @@ class DocumentVersionService:
             )
 
             uploaded_file.seek(0)
+
             saved_key = hr_document_storage.save(
                 storage_key,
                 uploaded_file,

@@ -4,7 +4,7 @@ from django.db import transaction
 from django.utils import timezone
 
 from employees.models import DocumentReview, DocumentVersion, HRDocument
-
+from employees.services.document_access import DocumentAccessService
 
 class DocumentReviewService:
     """Record HR document review decisions with authorization and audit history."""
@@ -30,7 +30,13 @@ class DocumentReviewService:
             raise PermissionDenied(
                 "You are not allowed to review HR documents."
             )
-
+        if not DocumentAccessService.can_view_document(
+            actor,
+            document,
+        ):
+            raise PermissionDenied(
+                "You cannot review documents outside your department."
+            )
         # A document owner or uploader cannot review their own submission.
         if actor.pk in {
             document.employee.user_id,

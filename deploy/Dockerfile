@@ -3,18 +3,27 @@ FROM python:3.12-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
+ENV TZ=America/New_York
 
 WORKDIR /app
 
-# Installer les dépendances Python
-COPY requirements.txt /app/requirements.txt
-RUN pip install --no-cache-dir -r requirements.txt
+# Installer les mises à jour système et les données de fuseaux horaires
+RUN apt-get update \
+    && apt-get upgrade -y \
+    && apt-get install -y --no-install-recommends tzdata \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
 
-# Copier le code Django
+# Installer les dépendances Python depuis le lockfile vérifié
+COPY requirements.lock /app/requirements.lock
+RUN pip install --no-cache-dir --require-hashes -r /app/requirements.lock
+
+# Copier le code Django et le scheduler
 COPY backend/ /app/
+COPY deploy/retention_scheduler.py /app/retention_scheduler.py
 
-# Créer le répertoire des journaux
-RUN mkdir -p /app/logs
+# Créer les répertoires nécessaires
+RUN mkdir -p /app/logs /app/staticfiles
 
 # Exécuter l'application avec un utilisateur non privilégié
 RUN addgroup --system django \
@@ -24,5 +33,9 @@ RUN addgroup --system django \
 USER django
 
 EXPOSE 8000
-
+HEALTHCHECK --interval=30s \
+    --timeout=5s \
+    --start-period=30s \
+    --retries=3 \
+    CMD ["python", "-c", "import socket; s=socket.create_connection(('127.0.0.1', 8000), timeout=3); s.close()"]
 CMD ["gunicorn", "config.wsgi:application", "--bind", "0.0.0.0:8000", "--workers", "3"]

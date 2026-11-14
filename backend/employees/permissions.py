@@ -3,6 +3,7 @@ from employees.services.onboarding_permissions import (
     OnboardingPermissionService,
 )
 from employees.services.document_access import DocumentAccessService
+from employees.models import EmployeeProfile
 
 class EmployeeProfilePermission(BasePermission):
     """
@@ -79,6 +80,7 @@ class EmployeeProfilePermission(BasePermission):
 
         return False
 
+
 class LeaveRequestPermission(BasePermission):
     """
     Control access to leave requests based on user roles.
@@ -101,10 +103,21 @@ class LeaveRequestPermission(BasePermission):
         if role == "SUPER_ADMIN":
             return True
 
-        if role in (
-            "HR_ADMIN",
-            "HR_MANAGER",
-        ):
+        if role == "HR_ADMIN":
+            return action in (
+                "list",
+                "retrieve",
+                "approve",
+                "reject",
+            )
+
+        if role == "HR_MANAGER":
+            # A manager must have an employee profile.
+            try:
+                user.employee_profile
+            except EmployeeProfile.DoesNotExist:
+                return False
+
             return action in (
                 "list",
                 "retrieve",
@@ -138,14 +151,27 @@ class LeaveRequestPermission(BasePermission):
         if role == "SUPER_ADMIN":
             return True
 
-        if role in (
-            "HR_ADMIN",
-            "HR_MANAGER",
-        ):
+        if role == "HR_ADMIN":
             return action in (
                 "retrieve",
                 "approve",
                 "reject",
+            )
+
+        if role == "HR_MANAGER":
+            try:
+                manager_profile = user.employee_profile
+            except EmployeeProfile.DoesNotExist:
+                return False
+
+            return (
+                obj.employee.department_id
+                == manager_profile.department_id
+                and action in (
+                    "retrieve",
+                    "approve",
+                    "reject",
+                )
             )
 
         if role == "EMPLOYEE":
@@ -159,6 +185,7 @@ class LeaveRequestPermission(BasePermission):
             )
 
         return False
+
 
 class BankAccountPermission(BasePermission):
     """Control access to employee bank account data."""
@@ -221,10 +248,23 @@ class BankAccountPermission(BasePermission):
             )
 
         if role == "HR_MANAGER":
-            return request.method in (
+            if request.method not in (
                 "GET",
                 "HEAD",
                 "OPTIONS",
+            ):
+                return False
+
+            try:
+                manager_department_id = (
+                    user.employee_profile.department_id
+                )
+            except EmployeeProfile.DoesNotExist:
+                return False
+
+            return (
+                obj.employee.department_id
+                == manager_department_id
             )
 
         if role == "EMPLOYEE":

@@ -96,6 +96,7 @@ class LeaveRequestSerializer(serializers.ModelSerializer):
         )
         read_only_fields = (
             "id",
+            "employee",
             "status",
             "reviewed_by",
             "reviewed_at",
@@ -169,6 +170,26 @@ class BankAccountSerializer(serializers.ModelSerializer):
             "created_at",
             "updated_at",
         )
+
+
+    def validate(self, attrs):
+        """Prevent changing the employee assigned to an existing bank account."""
+
+        if self.instance is not None:
+            new_employee = attrs.get("employee")
+
+            if (
+                new_employee is not None
+                and new_employee != self.instance.employee
+            ):
+                raise serializers.ValidationError({
+                    "employee": (
+                        "Changing the employee assigned to a bank account "
+                        "is not allowed."
+                    )
+                })
+
+        return attrs
 
     def get_masked_routing_number(self, obj) -> str :
         """Return only the last four digits of the routing number."""
@@ -507,3 +528,334 @@ class DashboardFilterSerializer(serializers.Serializer):
             )
 
         return value
+
+class WorkforceHeadcountSerializer(serializers.Serializer):
+    total = serializers.IntegerField()
+    active_accounts = serializers.IntegerField()
+    inactive_accounts = serializers.IntegerField()
+
+class WorkforceDepartmentDistributionSerializer(serializers.Serializer):
+    department_id = serializers.IntegerField()
+    department__name = serializers.CharField()
+    department__code = serializers.CharField()
+    employee_count = serializers.IntegerField()
+
+class WorkforcePositionDistributionSerializer(serializers.Serializer):
+    position_id = serializers.IntegerField()
+    position__title = serializers.CharField()
+    department__name = serializers.CharField()
+    employee_count = serializers.IntegerField()
+
+class WorkforceDepartmentMetricsSerializer(serializers.Serializer):
+    total = serializers.IntegerField()
+    distribution = WorkforceDepartmentDistributionSerializer(many=True)
+
+class WorkforcePositionMetricsSerializer(serializers.Serializer):
+    total = serializers.IntegerField()
+    distribution = WorkforcePositionDistributionSerializer(many=True)
+
+class WorkforceRoleDistributionSerializer(serializers.Serializer):
+    user__role = serializers.CharField()
+    employee_count = serializers.IntegerField()
+
+class WorkforceHiresSerializer(serializers.Serializer):
+    this_month = serializers.IntegerField()
+    this_year = serializers.IntegerField()
+
+class WorkforceMetricsSerializer(serializers.Serializer):
+    headcount = WorkforceHeadcountSerializer()
+    departments = WorkforceDepartmentMetricsSerializer()
+    positions = WorkforcePositionMetricsSerializer()
+    roles = WorkforceRoleDistributionSerializer(many=True)
+    hires = WorkforceHiresSerializer()
+    as_of = serializers.DateField()
+
+
+class ComplianceIncompleteProfileSerializer(serializers.Serializer):
+    id = serializers.IntegerField()
+    employee_id = serializers.CharField()
+    user__name = serializers.CharField()
+    department__name = serializers.CharField()
+    position__title = serializers.CharField()
+
+class ComplianceMissingDocumentsSerializer(serializers.Serializer):
+    employee_id = serializers.CharField()
+    employee_name = serializers.CharField()
+    missing_document_types = serializers.ListField(
+        child=serializers.CharField()
+    )
+
+class ComplianceDocumentDetailSerializer(serializers.Serializer):
+    id = serializers.UUIDField()
+    employee_id = serializers.CharField()
+    employee__user__name = serializers.CharField()
+    document_type = serializers.CharField()
+    expires_at = serializers.DateField(allow_null=True)
+
+class ComplianceProfilesSerializer(serializers.Serializer):
+    complete = serializers.IntegerField()
+    incomplete = serializers.IntegerField()
+    completion_rate = serializers.FloatField()
+    incomplete_details = ComplianceIncompleteProfileSerializer(many=True)
+
+class ComplianceDocumentsSerializer(serializers.Serializer):
+    compliant_employees = serializers.IntegerField()
+    employees_missing_required_documents = serializers.IntegerField()
+    compliance_rate = serializers.FloatField()
+    missing_documents_details = (
+        ComplianceMissingDocumentsSerializer(many=True)
+    )
+    expired_count = serializers.IntegerField()
+    expired_details = ComplianceDocumentDetailSerializer(many=True)
+    expiring_soon_count = serializers.IntegerField()
+    expiring_soon_details = ComplianceDocumentDetailSerializer(many=True)
+
+class ComplianceMetricsSerializer(serializers.Serializer):
+    as_of = serializers.DateField()
+    headcount = serializers.IntegerField()
+    profiles = ComplianceProfilesSerializer()
+    documents = ComplianceDocumentsSerializer()
+
+class OnboardingJourneyMetricsSerializer(serializers.Serializer):
+    total = serializers.IntegerField()
+    pending = serializers.IntegerField()
+    in_progress = serializers.IntegerField()
+    suspended = serializers.IntegerField()
+    completed = serializers.IntegerField()
+    cancelled = serializers.IntegerField()
+
+class OnboardingTaskMetricsSerializer(serializers.Serializer):
+    total = serializers.IntegerField()
+    pending = serializers.IntegerField()
+    in_progress = serializers.IntegerField()
+    blocked = serializers.IntegerField()
+    completed = serializers.IntegerField()
+    cancelled = serializers.IntegerField()
+    overdue = serializers.IntegerField()
+    low_priority = serializers.IntegerField()
+    medium_priority = serializers.IntegerField()
+    high_priority = serializers.IntegerField()
+    urgent_priority = serializers.IntegerField()
+
+class OnboardingProgressSerializer(serializers.Serializer):
+    total_eligible_tasks = serializers.IntegerField()
+    completed_tasks = serializers.IntegerField()
+    percentage = serializers.FloatField()
+
+class OnboardingMetricsSerializer(serializers.Serializer):
+    journeys = OnboardingJourneyMetricsSerializer()
+    tasks = OnboardingTaskMetricsSerializer()
+    progress = OnboardingProgressSerializer()
+    as_of = serializers.DateField()
+
+class SecurityOverviewSerializer(serializers.Serializer):
+    total_events = serializers.IntegerField()
+    login_success = serializers.IntegerField()
+    login_failed = serializers.IntegerField()
+
+class SecurityDetectionsSerializer(serializers.Serializer):
+    brute_force = serializers.IntegerField()
+    suspicious_ip = serializers.IntegerField()
+    unauthorized_access = serializers.IntegerField()
+    privilege_escalation = serializers.IntegerField()
+
+class SecuritySourcesSerializer(serializers.Serializer):
+    distinct_ips = serializers.IntegerField()
+    distinct_users = serializers.IntegerField()
+
+class SecurityEventDistributionSerializer(serializers.Serializer):
+    event_type = serializers.CharField()
+    count = serializers.IntegerField()
+
+class SecurityDailyActivitySerializer(serializers.Serializer):
+    created_at__date = serializers.DateField()
+    count = serializers.IntegerField()
+
+class SecurityRecentEventSerializer(serializers.Serializer):
+    id = serializers.IntegerField()
+    event_type = serializers.CharField()
+    ip_address = serializers.IPAddressField(allow_null=True)
+    request_path = serializers.CharField(allow_blank=True)
+    created_at = serializers.DateTimeField()
+
+class SecurityEventsSerializer(serializers.Serializer):
+    distribution = SecurityEventDistributionSerializer(many=True)
+
+class SecurityMetricsSerializer(serializers.Serializer):
+    as_of = serializers.DateField()
+    period_days = serializers.IntegerField()
+    overview = SecurityOverviewSerializer()
+    detections = SecurityDetectionsSerializer()
+    sources = SecuritySourcesSerializer()
+    events = SecurityEventsSerializer()
+    daily_activity = SecurityDailyActivitySerializer(many=True)
+    recent_events = SecurityRecentEventSerializer(many=True)
+
+class AuditOverviewSerializer(serializers.Serializer):
+    total_entries = serializers.IntegerField()
+    general_audit_entries = serializers.IntegerField()
+    document_access_entries = serializers.IntegerField()
+    workflow_entries = serializers.IntegerField()
+
+class AuditActionDistributionSerializer(serializers.Serializer):
+    action = serializers.CharField()
+    count = serializers.IntegerField()
+
+class AuditEventDistributionSerializer(serializers.Serializer):
+    event_type = serializers.CharField()
+    count = serializers.IntegerField()
+
+class AuditDailyActivitySerializer(serializers.Serializer):
+    created_at__date = serializers.DateField()
+    count = serializers.IntegerField()
+
+class AuditDocumentAccessSerializer(serializers.Serializer):
+    distribution = AuditActionDistributionSerializer(many=True)
+    access_denied = serializers.IntegerField()
+
+class AuditWorkflowsSerializer(serializers.Serializer):
+    distribution = AuditEventDistributionSerializer(many=True)
+    outcomes = serializers.DictField(
+        child=serializers.IntegerField()
+    )
+
+class AuditRecentGeneralEventSerializer(serializers.Serializer):
+    id = serializers.IntegerField()
+    action = serializers.CharField()
+    user_id = serializers.IntegerField(allow_null=True)
+    created_at = serializers.DateTimeField()
+
+class AuditRecentDocumentEventSerializer(serializers.Serializer):
+    id = serializers.IntegerField()
+    action = serializers.CharField()
+    user_id = serializers.IntegerField(allow_null=True)
+    document_id = serializers.UUIDField(allow_null=True)
+    created_at = serializers.DateTimeField()
+
+class AuditRecentWorkflowEventSerializer(serializers.Serializer):
+    id = serializers.UUIDField()
+    event_type = serializers.CharField()
+    outcome = serializers.CharField()
+    actor_id = serializers.IntegerField(allow_null=True)
+    created_at = serializers.DateTimeField()
+
+class AuditDailyActivityGroupSerializer(serializers.Serializer):
+    general_audit = AuditDailyActivitySerializer(many=True)
+    document_access = AuditDailyActivitySerializer(many=True)
+    workflow = AuditDailyActivitySerializer(many=True)
+
+class AuditRecentEventsSerializer(serializers.Serializer):
+    general_audit = AuditRecentGeneralEventSerializer(many=True)
+    document_access = AuditRecentDocumentEventSerializer(many=True)
+    workflow = AuditRecentWorkflowEventSerializer(many=True)
+
+class AuditGeneralAuditSerializer(serializers.Serializer):
+    distribution = AuditActionDistributionSerializer(many=True)
+
+class AuditMetricsSerializer(serializers.Serializer):
+    as_of = serializers.DateField()
+    period_days = serializers.IntegerField()
+    overview = AuditOverviewSerializer()
+    general_audit = AuditGeneralAuditSerializer()
+    document_access = AuditDocumentAccessSerializer()
+    workflows = AuditWorkflowsSerializer()
+    daily_activity = AuditDailyActivityGroupSerializer()
+    recent_events = AuditRecentEventsSerializer()
+
+class RiskComplianceSerializer(serializers.Serializer):
+    incomplete_profiles = serializers.IntegerField()
+    employees_missing_required_documents = serializers.IntegerField()
+    expired_documents = serializers.IntegerField()
+    documents_expiring_soon = serializers.IntegerField()
+
+class RiskDocumentLifecycleSerializer(serializers.Serializer):
+    pending_scan = serializers.IntegerField()
+    pending_review = serializers.IntegerField()
+    quarantined = serializers.IntegerField()
+    rejected = serializers.IntegerField()
+    verified = serializers.IntegerField()
+    archived = serializers.IntegerField()
+
+class RiskSecuritySerializer(serializers.Serializer):
+    brute_force = serializers.IntegerField()
+    suspicious_ip = serializers.IntegerField()
+    unauthorized_access = serializers.IntegerField()
+    privilege_escalation = serializers.IntegerField()
+
+class RiskMetricsSerializer(serializers.Serializer):
+    as_of = serializers.DateField()
+    compliance = RiskComplianceSerializer()
+    document_lifecycle = RiskDocumentLifecycleSerializer()
+    security = RiskSecuritySerializer()
+
+class OperationsWorkflowMetricsSerializer(serializers.Serializer):
+    total = serializers.IntegerField()
+    success = serializers.IntegerField()
+    failure = serializers.IntegerField()
+    denied = serializers.IntegerField()
+
+class OperationsNotificationTypeSerializer(serializers.Serializer):
+    details__notification_type = serializers.CharField()
+    count = serializers.IntegerField()
+
+class OperationsEventDistributionSerializer(serializers.Serializer):
+    event_type = serializers.CharField()
+    count = serializers.IntegerField()
+
+class OperationsDailyActivitySerializer(serializers.Serializer):
+    created_at__date = serializers.DateField()
+    count = serializers.IntegerField()
+
+class OperationsNotificationsSerializer(serializers.Serializer):
+    failed = serializers.IntegerField()
+    by_type = OperationsNotificationTypeSerializer(many=True)
+
+class OperationsEventsSerializer(serializers.Serializer):
+    distribution = OperationsEventDistributionSerializer(many=True)
+
+class OperationsMetricsSerializer(serializers.Serializer):
+    as_of = serializers.DateField()
+    period_days = serializers.IntegerField()
+    workflows = OperationsWorkflowMetricsSerializer()
+    notifications = OperationsNotificationsSerializer()
+    events = OperationsEventsSerializer()
+    daily_activity = OperationsDailyActivitySerializer(many=True)
+
+class RecruitmentPostingStatusSerializer(serializers.Serializer):
+    status = serializers.CharField()
+    count = serializers.IntegerField()
+
+class RecruitmentApplicationStatusSerializer(serializers.Serializer):
+    status = serializers.CharField()
+    count = serializers.IntegerField()
+
+class RecruitmentDailyActivitySerializer(serializers.Serializer):
+    applied_at__date = serializers.DateField()
+    count = serializers.IntegerField()
+
+class RecruitmentJobPostingsSerializer(serializers.Serializer):
+    total = serializers.IntegerField()
+    by_status = RecruitmentPostingStatusSerializer(many=True)
+
+class RecruitmentApplicationsSerializer(serializers.Serializer):
+    total = serializers.IntegerField()
+    by_status = RecruitmentApplicationStatusSerializer(many=True)
+    received_in_period = serializers.IntegerField()
+    hired_in_period = serializers.IntegerField()
+
+class RecruitmentMetricsSerializer(serializers.Serializer):
+    as_of = serializers.DateField()
+    period_days = serializers.IntegerField()
+    job_postings = RecruitmentJobPostingsSerializer()
+    applications = RecruitmentApplicationsSerializer()
+    daily_activity = RecruitmentDailyActivitySerializer(many=True)
+
+class DashboardResponseSerializer(serializers.Serializer):
+    workforce = WorkforceMetricsSerializer()
+    compliance = ComplianceMetricsSerializer()
+    onboarding = OnboardingMetricsSerializer()
+    operations = OperationsMetricsSerializer()
+    security = SecurityMetricsSerializer()
+    audit = AuditMetricsSerializer()
+    risk = RiskMetricsSerializer()
+    recruitment = RecruitmentMetricsSerializer()

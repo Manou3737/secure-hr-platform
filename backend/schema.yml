@@ -691,6 +691,559 @@ paths:
       responses:
         '204':
           description: No response body
+  /api/v1/employees/dashboard/:
+    get:
+      operationId: employees_dashboard_retrieve
+      description: Returns aggregated HR dashboard metrics across workforce, compliance,
+        onboarding, operations, security, audit, and risk. SUPER_ADMIN and HR_ADMIN
+        users can access global data or filter by department. HR_MANAGER users are
+        restricted to their own department. An HR_MANAGER cannot request another department.
+      summary: Retrieve HR dashboard metrics
+      parameters:
+      - in: query
+        name: as_of
+        schema:
+          type: string
+          format: date
+        description: Reference date in YYYY-MM-DD format. Future dates are rejected.
+      - in: query
+        name: days
+        schema:
+          type: integer
+        description: Analysis period in days (1–365). Defaults to 7.
+      - in: query
+        name: department_id
+        schema:
+          type: integer
+        description: Filter dashboard metrics by department ID.
+      - in: query
+        name: recent_limit
+        schema:
+          type: integer
+        description: Maximum number of recent records (1–100). Defaults to 10.
+      tags:
+      - HR Dashboard
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DashboardResponse'
+          description: ''
+        '400':
+          description: Invalid query parameters.
+        '401':
+          description: Authentication credentials were not provided or are invalid.
+        '403':
+          description: The user does not have dashboard access or requested a forbidden
+            department.
+  /api/v1/employees/document-access-logs/:
+    get:
+      operationId: v1_employees_document_access_logs_list
+      description: Read-only API for authorized HR staff to inspect document audit
+        logs.
+      parameters:
+      - in: query
+        name: action
+        schema:
+          type: string
+          enum:
+          - ACCESS_DENIED
+          - ARCHIVE
+          - CREATE
+          - CREATE_VERSION
+          - DOWNLOAD
+          - REJECT
+          - UPDATE
+          - VERIFY
+          - VIEW
+        description: |-
+          * `VIEW` - View
+          * `DOWNLOAD` - Download
+          * `CREATE` - Create
+          * `UPDATE` - Update
+          * `VERIFY` - Verify
+          * `REJECT` - Reject
+          * `ARCHIVE` - Archive
+          * `CREATE_VERSION` - Create version
+          * `ACCESS_DENIED` - Access denied
+      - in: query
+        name: created_after
+        schema:
+          type: string
+          format: date-time
+      - in: query
+        name: created_before
+        schema:
+          type: string
+          format: date-time
+      - in: query
+        name: document
+        schema:
+          type: string
+          format: uuid
+      - name: ordering
+        required: false
+        in: query
+        description: Which field to use when ordering the results.
+        schema:
+          type: string
+      - name: page
+        required: false
+        in: query
+        description: A page number within the paginated result set.
+        schema:
+          type: integer
+      - name: page_size
+        required: false
+        in: query
+        description: Number of results to return per page.
+        schema:
+          type: integer
+      - name: search
+        required: false
+        in: query
+        description: A search term.
+        schema:
+          type: string
+      - in: query
+        name: user
+        schema:
+          type: number
+      tags:
+      - v1
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaginatedDocumentAccessLogList'
+          description: ''
+  /api/v1/employees/document-access-logs/{id}/:
+    get:
+      operationId: v1_employees_document_access_logs_retrieve
+      description: Read-only API for authorized HR staff to inspect document audit
+        logs.
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: integer
+        description: A unique integer value identifying this document access log.
+        required: true
+      tags:
+      - v1
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DocumentAccessLog'
+          description: ''
+  /api/v1/employees/hr-documents/:
+    get:
+      operationId: v1_employees_hr_documents_list
+      description: Expose authorized HR document metadata operations.
+      parameters:
+      - in: query
+        name: document_type
+        schema:
+          type: string
+          enum:
+          - CERTIFICATION
+          - EMPLOYMENT_CONTRACT
+          - IDENTITY_DOCUMENT
+          - ONBOARDING_FORM
+          - OTHER
+          - POLICY_ACKNOWLEDGMENT
+          - TAX_FORM
+        description: |-
+          * `IDENTITY_DOCUMENT` - Identity document
+          * `EMPLOYMENT_CONTRACT` - Employment contract
+          * `TAX_FORM` - Tax form
+          * `CERTIFICATION` - Certification
+          * `POLICY_ACKNOWLEDGMENT` - Policy acknowledgment
+          * `ONBOARDING_FORM` - Onboarding form
+          * `OTHER` - Other
+      - in: query
+        name: employee
+        schema:
+          type: integer
+      - name: ordering
+        required: false
+        in: query
+        description: Which field to use when ordering the results.
+        schema:
+          type: string
+      - name: page
+        required: false
+        in: query
+        description: A page number within the paginated result set.
+        schema:
+          type: integer
+      - name: page_size
+        required: false
+        in: query
+        description: Number of results to return per page.
+        schema:
+          type: integer
+      - in: query
+        name: status
+        schema:
+          type: string
+          enum:
+          - ARCHIVED
+          - PENDING_REVIEW
+          - PENDING_SCAN
+          - QUARANTINED
+          - REJECTED
+          - VERIFIED
+        description: |-
+          * `PENDING_SCAN` - Pending antivirus scan
+          * `PENDING_REVIEW` - Pending HR review
+          * `VERIFIED` - Verified
+          * `QUARANTINED` - Quarantined
+          * `REJECTED` - Rejected
+          * `ARCHIVED` - Archived
+      tags:
+      - v1
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaginatedHRDocumentList'
+          description: ''
+    post:
+      operationId: v1_employees_hr_documents_create
+      description: Expose authorized HR document metadata operations.
+      tags:
+      - v1
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/HRDocument'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/HRDocument'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/HRDocument'
+        required: true
+      security:
+      - jwtAuth: []
+      responses:
+        '201':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HRDocument'
+          description: ''
+  /api/v1/employees/hr-documents/{id}/:
+    get:
+      operationId: v1_employees_hr_documents_retrieve
+      description: Retrieve document metadata and record the access.
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: string
+          format: uuid
+        description: A UUID string identifying this hr document.
+        required: true
+      tags:
+      - v1
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HRDocument'
+          description: ''
+    put:
+      operationId: v1_employees_hr_documents_update
+      description: Expose authorized HR document metadata operations.
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: string
+          format: uuid
+        description: A UUID string identifying this hr document.
+        required: true
+      tags:
+      - v1
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/HRDocument'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/HRDocument'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/HRDocument'
+        required: true
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HRDocument'
+          description: ''
+    patch:
+      operationId: v1_employees_hr_documents_partial_update
+      description: Expose authorized HR document metadata operations.
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: string
+          format: uuid
+        description: A UUID string identifying this hr document.
+        required: true
+      tags:
+      - v1
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PatchedHRDocument'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/PatchedHRDocument'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/PatchedHRDocument'
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HRDocument'
+          description: ''
+  /api/v1/employees/hr-documents/{id}/archive/:
+    post:
+      operationId: v1_employees_hr_documents_archive_create
+      description: Archive a verified or rejected HR document.
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: string
+          format: uuid
+        description: A UUID string identifying this hr document.
+        required: true
+      tags:
+      - v1
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/HRDocument'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/HRDocument'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/HRDocument'
+        required: true
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HRDocument'
+          description: ''
+  /api/v1/employees/hr-documents/{id}/create-version/:
+    post:
+      operationId: v1_employees_hr_documents_create_version_create
+      description: Create a new private version of an accessible HR document.
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: string
+          format: uuid
+        description: A UUID string identifying this hr document.
+        required: true
+      tags:
+      - v1
+      requestBody:
+        content:
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/HRDocument'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/HRDocument'
+        required: true
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HRDocument'
+          description: ''
+  /api/v1/employees/hr-documents/{id}/download/:
+    get:
+      operationId: v1_employees_hr_documents_download_retrieve
+      description: Download a verified HR document as an attachment.
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: string
+          format: uuid
+        description: A UUID string identifying this hr document.
+        required: true
+      tags:
+      - v1
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HRDocument'
+          description: ''
+  /api/v1/employees/hr-documents/{id}/reject/:
+    post:
+      operationId: v1_employees_hr_documents_reject_create
+      description: Reject a document and record the review decision.
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: string
+          format: uuid
+        description: A UUID string identifying this hr document.
+        required: true
+      tags:
+      - v1
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/HRDocument'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/HRDocument'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/HRDocument'
+        required: true
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HRDocument'
+          description: ''
+  /api/v1/employees/hr-documents/{id}/reviews/:
+    get:
+      operationId: v1_employees_hr_documents_reviews_retrieve
+      description: List review history for an accessible HR document.
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: string
+          format: uuid
+        description: A UUID string identifying this hr document.
+        required: true
+      tags:
+      - v1
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HRDocument'
+          description: ''
+  /api/v1/employees/hr-documents/{id}/verify/:
+    post:
+      operationId: v1_employees_hr_documents_verify_create
+      description: Verify a document pending HR review and record the decision.
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: string
+          format: uuid
+        description: A UUID string identifying this hr document.
+        required: true
+      tags:
+      - v1
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/HRDocument'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/HRDocument'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/HRDocument'
+        required: true
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HRDocument'
+          description: ''
+  /api/v1/employees/hr-documents/{id}/versions/:
+    get:
+      operationId: v1_employees_hr_documents_versions_retrieve
+      description: List version metadata for an accessible HR document.
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: string
+          format: uuid
+        description: A UUID string identifying this hr document.
+        required: true
+      tags:
+      - v1
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HRDocument'
+          description: ''
   /api/v1/employees/leave-requests/:
     get:
       operationId: v1_employees_leave_requests_list
@@ -769,7 +1322,7 @@ paths:
           description: ''
     post:
       operationId: v1_employees_leave_requests_create
-      description: API endpoint for managing employee leave requests.
+      description: Reject employees without profiles before serializer validation.
       tags:
       - v1
       requestBody:
@@ -998,6 +1551,174 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/LeaveRequest'
+          description: ''
+  /api/v1/employees/onboarding/journeys/:
+    get:
+      operationId: v1_employees_onboarding_journeys_list
+      description: Expose onboarding journeys with role-based queryset filtering.
+      parameters:
+      - name: page
+        required: false
+        in: query
+        description: A page number within the paginated result set.
+        schema:
+          type: integer
+      - name: page_size
+        required: false
+        in: query
+        description: Number of results to return per page.
+        schema:
+          type: integer
+      tags:
+      - v1
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaginatedOnboardingJourneyList'
+          description: ''
+  /api/v1/employees/onboarding/journeys/{id}/:
+    get:
+      operationId: v1_employees_onboarding_journeys_retrieve
+      description: Expose onboarding journeys with role-based queryset filtering.
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      tags:
+      - v1
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OnboardingJourney'
+          description: ''
+  /api/v1/employees/onboarding/tasks/:
+    get:
+      operationId: v1_employees_onboarding_tasks_list
+      description: Expose onboarding tasks and controlled workflow operations.
+      parameters:
+      - name: page
+        required: false
+        in: query
+        description: A page number within the paginated result set.
+        schema:
+          type: integer
+      - name: page_size
+        required: false
+        in: query
+        description: Number of results to return per page.
+        schema:
+          type: integer
+      tags:
+      - v1
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaginatedOnboardingTaskList'
+          description: ''
+  /api/v1/employees/onboarding/tasks/{id}/:
+    get:
+      operationId: v1_employees_onboarding_tasks_retrieve
+      description: Expose onboarding tasks and controlled workflow operations.
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      tags:
+      - v1
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OnboardingTask'
+          description: ''
+  /api/v1/employees/onboarding/tasks/{id}/assign/:
+    post:
+      operationId: v1_employees_onboarding_tasks_assign_create
+      description: Expose onboarding tasks and controlled workflow operations.
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      tags:
+      - v1
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OnboardingTaskAssignment'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/OnboardingTaskAssignment'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/OnboardingTaskAssignment'
+        required: true
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OnboardingTaskAssignment'
+          description: ''
+  /api/v1/employees/onboarding/tasks/{id}/transition/:
+    post:
+      operationId: v1_employees_onboarding_tasks_transition_create
+      description: Expose onboarding tasks and controlled workflow operations.
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      tags:
+      - v1
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OnboardingTaskTransition'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/OnboardingTaskTransition'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/OnboardingTaskTransition'
+        required: true
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OnboardingTaskTransition'
           description: ''
   /api/v1/employees/performance-reviews/:
     get:
@@ -1261,6 +1982,374 @@ paths:
               schema:
                 $ref: '#/components/schemas/PerformanceReview'
           description: ''
+  /api/v1/recruitment/applications/:
+    get:
+      operationId: list_job_applications
+      description: Submit public applications and list applications for HR users.
+      parameters:
+      - name: page
+        required: false
+        in: query
+        description: A page number within the paginated result set.
+        schema:
+          type: integer
+      - name: page_size
+        required: false
+        in: query
+        description: Number of results to return per page.
+        schema:
+          type: integer
+      tags:
+      - v1
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaginatedJobApplicationList'
+          description: ''
+    post:
+      operationId: submit_job_application
+      description: Submit public applications and list applications for HR users.
+      tags:
+      - v1
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/JobApplication'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/JobApplication'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/JobApplication'
+        required: true
+      security:
+      - jwtAuth: []
+      - {}
+      responses:
+        '201':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApplicationSubmissionResponse'
+          description: ''
+  /api/v1/recruitment/applications/{application_id}/:
+    get:
+      operationId: v1_recruitment_applications_retrieve
+      description: Retrieve a job application for authorized HR users.
+      parameters:
+      - in: path
+        name: application_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      tags:
+      - v1
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/JobApplication'
+          description: ''
+  /api/v1/recruitment/applications/{application_id}/assign/:
+    post:
+      operationId: v1_recruitment_applications_assign_create
+      description: Assign an application to an authorized HR user.
+      parameters:
+      - in: path
+        name: application_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      tags:
+      - v1
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/JobApplicationAssignment'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/JobApplicationAssignment'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/JobApplicationAssignment'
+        required: true
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/JobApplication'
+          description: ''
+  /api/v1/recruitment/applications/{application_id}/status/:
+    post:
+      operationId: v1_recruitment_applications_status_create
+      description: Change the status of a job application.
+      parameters:
+      - in: path
+        name: application_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      tags:
+      - v1
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ApplicationStatusChange'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/ApplicationStatusChange'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/ApplicationStatusChange'
+        required: true
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/JobApplication'
+          description: ''
+  /api/v1/recruitment/candidates/:
+    get:
+      operationId: list_candidates
+      description: List and create external candidates.
+      parameters:
+      - name: page
+        required: false
+        in: query
+        description: A page number within the paginated result set.
+        schema:
+          type: integer
+      - name: page_size
+        required: false
+        in: query
+        description: Number of results to return per page.
+        schema:
+          type: integer
+      tags:
+      - v1
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaginatedCandidateList'
+          description: ''
+    post:
+      operationId: create_candidate
+      description: List and create external candidates.
+      tags:
+      - v1
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CandidateCreate'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/CandidateCreate'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/CandidateCreate'
+        required: true
+      security:
+      - jwtAuth: []
+      responses:
+        '201':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Candidate'
+          description: ''
+  /api/v1/recruitment/candidates/{candidate_id}/:
+    get:
+      operationId: v1_recruitment_candidates_retrieve
+      description: Retrieve and update an external candidate.
+      parameters:
+      - in: path
+        name: candidate_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      tags:
+      - v1
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Candidate'
+          description: ''
+    patch:
+      operationId: v1_recruitment_candidates_partial_update
+      description: Retrieve and update an external candidate.
+      parameters:
+      - in: path
+        name: candidate_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      tags:
+      - v1
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PatchedCandidate'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/PatchedCandidate'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/PatchedCandidate'
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Candidate'
+          description: ''
+  /api/v1/recruitment/job-postings/:
+    get:
+      operationId: list_public_job_postings
+      description: Create job postings and publicly list open postings.
+      parameters:
+      - name: page
+        required: false
+        in: query
+        description: A page number within the paginated result set.
+        schema:
+          type: integer
+      - name: page_size
+        required: false
+        in: query
+        description: Number of results to return per page.
+        schema:
+          type: integer
+      tags:
+      - v1
+      security:
+      - jwtAuth: []
+      - {}
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaginatedPublicJobPostingList'
+          description: ''
+    post:
+      operationId: create_job_posting
+      description: Create job postings and publicly list open postings.
+      tags:
+      - v1
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/JobPosting'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/JobPosting'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/JobPosting'
+        required: true
+      security:
+      - jwtAuth: []
+      responses:
+        '201':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/JobPosting'
+          description: ''
+  /api/v1/recruitment/job-postings/{posting_id}/:
+    patch:
+      operationId: v1_recruitment_job_postings_partial_update
+      description: Update an existing recruitment job posting.
+      parameters:
+      - in: path
+        name: posting_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      tags:
+      - v1
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PatchedJobPosting'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/PatchedJobPosting'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/PatchedJobPosting'
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/JobPosting'
+          description: ''
+  /api/v1/recruitment/job-postings/{posting_id}/{action}/:
+    post:
+      operationId: perform_job_posting_action
+      description: Publish, close, or cancel a job posting.
+      parameters:
+      - in: path
+        name: action
+        schema:
+          type: string
+        required: true
+      - in: path
+        name: posting_id
+        schema:
+          type: string
+          format: uuid
+        required: true
+      tags:
+      - v1
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/JobPosting'
+          description: ''
 components:
   schemas:
     AccountTypeEnum:
@@ -1271,6 +2360,258 @@ components:
       description: |-
         * `CHECKING` - Checking
         * `SAVINGS` - Savings
+    ActionEnum:
+      enum:
+      - VIEW
+      - DOWNLOAD
+      - CREATE
+      - UPDATE
+      - VERIFY
+      - REJECT
+      - ARCHIVE
+      - CREATE_VERSION
+      - ACCESS_DENIED
+      type: string
+      description: |-
+        * `VIEW` - View
+        * `DOWNLOAD` - Download
+        * `CREATE` - Create
+        * `UPDATE` - Update
+        * `VERIFY` - Verify
+        * `REJECT` - Reject
+        * `ARCHIVE` - Archive
+        * `CREATE_VERSION` - Create version
+        * `ACCESS_DENIED` - Access denied
+    ApplicationStatusChange:
+      type: object
+      description: Validate application status change requests.
+      properties:
+        status:
+          $ref: '#/components/schemas/JobApplicationStatusEnum'
+        note:
+          type: string
+          maxLength: 2000
+      required:
+      - status
+    ApplicationSubmissionResponse:
+      type: object
+      properties:
+        detail:
+          type: string
+      required:
+      - detail
+    AuditActionDistribution:
+      type: object
+      properties:
+        action:
+          type: string
+        count:
+          type: integer
+      required:
+      - action
+      - count
+    AuditDailyActivity:
+      type: object
+      properties:
+        created_at__date:
+          type: string
+          format: date
+        count:
+          type: integer
+      required:
+      - count
+      - created_at__date
+    AuditDailyActivityGroup:
+      type: object
+      properties:
+        general_audit:
+          type: array
+          items:
+            $ref: '#/components/schemas/AuditDailyActivity'
+        document_access:
+          type: array
+          items:
+            $ref: '#/components/schemas/AuditDailyActivity'
+        workflow:
+          type: array
+          items:
+            $ref: '#/components/schemas/AuditDailyActivity'
+      required:
+      - document_access
+      - general_audit
+      - workflow
+    AuditDocumentAccess:
+      type: object
+      properties:
+        distribution:
+          type: array
+          items:
+            $ref: '#/components/schemas/AuditActionDistribution'
+        access_denied:
+          type: integer
+      required:
+      - access_denied
+      - distribution
+    AuditEventDistribution:
+      type: object
+      properties:
+        event_type:
+          type: string
+        count:
+          type: integer
+      required:
+      - count
+      - event_type
+    AuditGeneralAudit:
+      type: object
+      properties:
+        distribution:
+          type: array
+          items:
+            $ref: '#/components/schemas/AuditActionDistribution'
+      required:
+      - distribution
+    AuditMetrics:
+      type: object
+      properties:
+        as_of:
+          type: string
+          format: date
+        period_days:
+          type: integer
+        overview:
+          $ref: '#/components/schemas/AuditOverview'
+        general_audit:
+          $ref: '#/components/schemas/AuditGeneralAudit'
+        document_access:
+          $ref: '#/components/schemas/AuditDocumentAccess'
+        workflows:
+          $ref: '#/components/schemas/AuditWorkflows'
+        daily_activity:
+          $ref: '#/components/schemas/AuditDailyActivityGroup'
+        recent_events:
+          $ref: '#/components/schemas/AuditRecentEvents'
+      required:
+      - as_of
+      - daily_activity
+      - document_access
+      - general_audit
+      - overview
+      - period_days
+      - recent_events
+      - workflows
+    AuditOverview:
+      type: object
+      properties:
+        total_entries:
+          type: integer
+        general_audit_entries:
+          type: integer
+        document_access_entries:
+          type: integer
+        workflow_entries:
+          type: integer
+      required:
+      - document_access_entries
+      - general_audit_entries
+      - total_entries
+      - workflow_entries
+    AuditRecentDocumentEvent:
+      type: object
+      properties:
+        id:
+          type: integer
+        action:
+          type: string
+        user_id:
+          type: integer
+          nullable: true
+        document_id:
+          type: string
+          format: uuid
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+      required:
+      - action
+      - created_at
+      - document_id
+      - id
+      - user_id
+    AuditRecentEvents:
+      type: object
+      properties:
+        general_audit:
+          type: array
+          items:
+            $ref: '#/components/schemas/AuditRecentGeneralEvent'
+        document_access:
+          type: array
+          items:
+            $ref: '#/components/schemas/AuditRecentDocumentEvent'
+        workflow:
+          type: array
+          items:
+            $ref: '#/components/schemas/AuditRecentWorkflowEvent'
+      required:
+      - document_access
+      - general_audit
+      - workflow
+    AuditRecentGeneralEvent:
+      type: object
+      properties:
+        id:
+          type: integer
+        action:
+          type: string
+        user_id:
+          type: integer
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+      required:
+      - action
+      - created_at
+      - id
+      - user_id
+    AuditRecentWorkflowEvent:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        event_type:
+          type: string
+        outcome:
+          type: string
+        actor_id:
+          type: integer
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+      required:
+      - actor_id
+      - created_at
+      - event_type
+      - id
+      - outcome
+    AuditWorkflows:
+      type: object
+      properties:
+        distribution:
+          type: array
+          items:
+            $ref: '#/components/schemas/AuditEventDistribution'
+        outcomes:
+          type: object
+          additionalProperties:
+            type: integer
+      required:
+      - distribution
+      - outcomes
     AuthToken:
       type: object
       description: Validate user credentials for JWT authentication.
@@ -1337,6 +2678,323 @@ components:
       - masked_routing_number
       - routing_number
       - updated_at
+    Candidate:
+      type: object
+      description: Serialize candidate profiles.
+      properties:
+        id:
+          type: string
+          format: uuid
+          readOnly: true
+        department:
+          type: integer
+          readOnly: true
+        first_name:
+          type: string
+          maxLength: 100
+        last_name:
+          type: string
+          maxLength: 100
+        email:
+          type: string
+          format: email
+          maxLength: 255
+        phone:
+          type: string
+          maxLength: 30
+        linkedin_url:
+          oneOf:
+          - type: string
+            format: uri
+            maxLength: 200
+          - type: string
+            maxLength: 0
+        portfolio_url:
+          oneOf:
+          - type: string
+            format: uri
+            maxLength: 200
+          - type: string
+            maxLength: 0
+        created_at:
+          type: string
+          format: date-time
+          readOnly: true
+        updated_at:
+          type: string
+          format: date-time
+          readOnly: true
+      required:
+      - created_at
+      - department
+      - email
+      - first_name
+      - id
+      - last_name
+      - updated_at
+    CandidateCreate:
+      type: object
+      description: Validate administrative candidate creation.
+      properties:
+        department:
+          type: integer
+        first_name:
+          type: string
+          maxLength: 100
+        last_name:
+          type: string
+          maxLength: 100
+        email:
+          type: string
+          format: email
+          maxLength: 255
+        phone:
+          type: string
+          maxLength: 30
+        linkedin_url:
+          oneOf:
+          - type: string
+            format: uri
+            maxLength: 200
+          - type: string
+            maxLength: 0
+        portfolio_url:
+          oneOf:
+          - type: string
+            format: uri
+            maxLength: 200
+          - type: string
+            maxLength: 0
+      required:
+      - department
+      - email
+      - first_name
+      - last_name
+    ComplianceDocumentDetail:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        employee_id:
+          type: string
+        employee__user__name:
+          type: string
+        document_type:
+          type: string
+        expires_at:
+          type: string
+          format: date
+          nullable: true
+      required:
+      - document_type
+      - employee__user__name
+      - employee_id
+      - expires_at
+      - id
+    ComplianceDocuments:
+      type: object
+      properties:
+        compliant_employees:
+          type: integer
+        employees_missing_required_documents:
+          type: integer
+        compliance_rate:
+          type: number
+          format: double
+        missing_documents_details:
+          type: array
+          items:
+            $ref: '#/components/schemas/ComplianceMissingDocuments'
+        expired_count:
+          type: integer
+        expired_details:
+          type: array
+          items:
+            $ref: '#/components/schemas/ComplianceDocumentDetail'
+        expiring_soon_count:
+          type: integer
+        expiring_soon_details:
+          type: array
+          items:
+            $ref: '#/components/schemas/ComplianceDocumentDetail'
+      required:
+      - compliance_rate
+      - compliant_employees
+      - employees_missing_required_documents
+      - expired_count
+      - expired_details
+      - expiring_soon_count
+      - expiring_soon_details
+      - missing_documents_details
+    ComplianceIncompleteProfile:
+      type: object
+      properties:
+        id:
+          type: integer
+        employee_id:
+          type: string
+        user__name:
+          type: string
+        department__name:
+          type: string
+        position__title:
+          type: string
+      required:
+      - department__name
+      - employee_id
+      - id
+      - position__title
+      - user__name
+    ComplianceMetrics:
+      type: object
+      properties:
+        as_of:
+          type: string
+          format: date
+        headcount:
+          type: integer
+        profiles:
+          $ref: '#/components/schemas/ComplianceProfiles'
+        documents:
+          $ref: '#/components/schemas/ComplianceDocuments'
+      required:
+      - as_of
+      - documents
+      - headcount
+      - profiles
+    ComplianceMissingDocuments:
+      type: object
+      properties:
+        employee_id:
+          type: string
+        employee_name:
+          type: string
+        missing_document_types:
+          type: array
+          items:
+            type: string
+      required:
+      - employee_id
+      - employee_name
+      - missing_document_types
+    ComplianceProfiles:
+      type: object
+      properties:
+        complete:
+          type: integer
+        incomplete:
+          type: integer
+        completion_rate:
+          type: number
+          format: double
+        incomplete_details:
+          type: array
+          items:
+            $ref: '#/components/schemas/ComplianceIncompleteProfile'
+      required:
+      - complete
+      - completion_rate
+      - incomplete
+      - incomplete_details
+    DashboardResponse:
+      type: object
+      properties:
+        workforce:
+          $ref: '#/components/schemas/WorkforceMetrics'
+        compliance:
+          $ref: '#/components/schemas/ComplianceMetrics'
+        onboarding:
+          $ref: '#/components/schemas/OnboardingMetrics'
+        operations:
+          $ref: '#/components/schemas/OperationsMetrics'
+        security:
+          $ref: '#/components/schemas/SecurityMetrics'
+        audit:
+          $ref: '#/components/schemas/AuditMetrics'
+        risk:
+          $ref: '#/components/schemas/RiskMetrics'
+      required:
+      - audit
+      - compliance
+      - onboarding
+      - operations
+      - risk
+      - security
+      - workforce
+    DocumentAccessLog:
+      type: object
+      description: Expose audit logs as read-only records.
+      properties:
+        id:
+          type: integer
+          readOnly: true
+        document:
+          type: string
+          format: uuid
+          readOnly: true
+          nullable: true
+        document_title:
+          type: string
+          readOnly: true
+        user:
+          type: integer
+          readOnly: true
+          nullable: true
+        user_email:
+          type: string
+          readOnly: true
+        action:
+          allOf:
+          - $ref: '#/components/schemas/ActionEnum'
+          readOnly: true
+        ip_address:
+          type: string
+          readOnly: true
+          nullable: true
+        user_agent:
+          type: string
+          readOnly: true
+        request_path:
+          type: string
+          readOnly: true
+        details:
+          type: string
+          readOnly: true
+        created_at:
+          type: string
+          format: date-time
+          readOnly: true
+      required:
+      - action
+      - created_at
+      - details
+      - document
+      - document_title
+      - id
+      - ip_address
+      - request_path
+      - user
+      - user_agent
+      - user_email
+    DocumentTypeEnum:
+      enum:
+      - IDENTITY_DOCUMENT
+      - EMPLOYMENT_CONTRACT
+      - TAX_FORM
+      - CERTIFICATION
+      - POLICY_ACKNOWLEDGMENT
+      - ONBOARDING_FORM
+      - OTHER
+      type: string
+      description: |-
+        * `IDENTITY_DOCUMENT` - Identity document
+        * `EMPLOYMENT_CONTRACT` - Employment contract
+        * `TAX_FORM` - Tax form
+        * `CERTIFICATION` - Certification
+        * `POLICY_ACKNOWLEDGMENT` - Policy acknowledgment
+        * `ONBOARDING_FORM` - Onboarding form
+        * `OTHER` - Other
     EmployeeProfile:
       type: object
       description: Serialize employee HR profile data.
@@ -1382,6 +3040,282 @@ components:
       - position
       - updated_at
       - user
+    EmploymentTypeEnum:
+      enum:
+      - FULL_TIME
+      - PART_TIME
+      - CONTRACT
+      - TEMPORARY
+      - INTERNSHIP
+      type: string
+      description: |-
+        * `FULL_TIME` - Full-time
+        * `PART_TIME` - Part-time
+        * `CONTRACT` - Contract
+        * `TEMPORARY` - Temporary
+        * `INTERNSHIP` - Internship
+    HRDocument:
+      type: object
+      description: Serialize HR document metadata without exposing storage details.
+      properties:
+        id:
+          type: string
+          format: uuid
+          readOnly: true
+        employee:
+          type: integer
+          readOnly: true
+        title:
+          type: string
+          maxLength: 200
+        document_file:
+          type: string
+          format: uri
+          writeOnly: true
+        document_type:
+          $ref: '#/components/schemas/DocumentTypeEnum'
+        original_filename:
+          type: string
+          readOnly: true
+        mime_type:
+          type: string
+          readOnly: true
+        size_bytes:
+          type: integer
+          readOnly: true
+        checksum_sha256:
+          type: string
+          readOnly: true
+        status:
+          allOf:
+          - $ref: '#/components/schemas/HRDocumentStatusEnum'
+          readOnly: true
+        uploaded_by:
+          type: integer
+          readOnly: true
+        verified_by:
+          type: integer
+          readOnly: true
+          nullable: true
+        uploaded_at:
+          type: string
+          format: date-time
+          readOnly: true
+        updated_at:
+          type: string
+          format: date-time
+          readOnly: true
+        verified_at:
+          type: string
+          format: date-time
+          readOnly: true
+          nullable: true
+        rejection_reason:
+          type: string
+          readOnly: true
+        expires_at:
+          type: string
+          format: date
+          nullable: true
+        metadata: {}
+      required:
+      - checksum_sha256
+      - document_file
+      - document_type
+      - employee
+      - id
+      - mime_type
+      - original_filename
+      - rejection_reason
+      - size_bytes
+      - status
+      - title
+      - updated_at
+      - uploaded_at
+      - uploaded_by
+      - verified_at
+      - verified_by
+    HRDocumentStatusEnum:
+      enum:
+      - PENDING_SCAN
+      - PENDING_REVIEW
+      - VERIFIED
+      - QUARANTINED
+      - REJECTED
+      - ARCHIVED
+      type: string
+      description: |-
+        * `PENDING_SCAN` - Pending antivirus scan
+        * `PENDING_REVIEW` - Pending HR review
+        * `VERIFIED` - Verified
+        * `QUARANTINED` - Quarantined
+        * `REJECTED` - Rejected
+        * `ARCHIVED` - Archived
+    JobApplication:
+      type: object
+      description: Serialize job applications.
+      properties:
+        id:
+          type: string
+          format: uuid
+          readOnly: true
+        candidate:
+          allOf:
+          - $ref: '#/components/schemas/Candidate'
+          readOnly: true
+        candidate_data:
+          allOf:
+          - $ref: '#/components/schemas/Candidate'
+          writeOnly: true
+        job_posting:
+          type: string
+          format: uuid
+        status:
+          allOf:
+          - $ref: '#/components/schemas/JobApplicationStatusEnum'
+          readOnly: true
+        cover_letter:
+          type: string
+        assigned_to:
+          type: integer
+          readOnly: true
+          nullable: true
+        privacy_consent:
+          type: boolean
+        privacy_consent_at:
+          type: string
+          format: date-time
+          readOnly: true
+          nullable: true
+        applied_at:
+          type: string
+          format: date-time
+          readOnly: true
+        updated_at:
+          type: string
+          format: date-time
+          readOnly: true
+      required:
+      - applied_at
+      - assigned_to
+      - candidate
+      - candidate_data
+      - id
+      - job_posting
+      - privacy_consent_at
+      - status
+      - updated_at
+    JobApplicationAssignment:
+      type: object
+      description: Validate application assignment requests.
+      properties:
+        assigned_to_id:
+          type: integer
+          minimum: 1
+      required:
+      - assigned_to_id
+    JobApplicationStatusEnum:
+      enum:
+      - SUBMITTED
+      - SCREENING
+      - INTERVIEW
+      - OFFER
+      - HIRED
+      - REJECTED
+      - WITHDRAWN
+      type: string
+      description: |-
+        * `SUBMITTED` - Submitted
+        * `SCREENING` - Screening
+        * `INTERVIEW` - Interview
+        * `OFFER` - Offer
+        * `HIRED` - Hired
+        * `REJECTED` - Rejected
+        * `WITHDRAWN` - Withdrawn
+    JobPosting:
+      type: object
+      description: Serialize job postings.
+      properties:
+        id:
+          type: string
+          format: uuid
+          readOnly: true
+        title:
+          type: string
+          maxLength: 150
+        department:
+          type: integer
+        position:
+          type: integer
+        description:
+          type: string
+        responsibilities:
+          type: string
+        qualifications:
+          type: string
+        employment_type:
+          $ref: '#/components/schemas/EmploymentTypeEnum'
+        location:
+          type: string
+          maxLength: 255
+        salary_min:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,10}(?:\.\d{0,2})?$
+          nullable: true
+        salary_max:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,10}(?:\.\d{0,2})?$
+          nullable: true
+        status:
+          allOf:
+          - $ref: '#/components/schemas/JobPostingStatusEnum'
+          readOnly: true
+        application_deadline:
+          type: string
+          format: date
+          nullable: true
+        published_at:
+          type: string
+          format: date-time
+          readOnly: true
+          nullable: true
+        created_by:
+          type: integer
+          readOnly: true
+        created_at:
+          type: string
+          format: date-time
+          readOnly: true
+        updated_at:
+          type: string
+          format: date-time
+          readOnly: true
+      required:
+      - created_at
+      - created_by
+      - department
+      - description
+      - employment_type
+      - id
+      - position
+      - published_at
+      - status
+      - title
+      - updated_at
+    JobPostingStatusEnum:
+      enum:
+      - DRAFT
+      - OPEN
+      - CLOSED
+      - CANCELLED
+      type: string
+      description: |-
+        * `DRAFT` - Draft
+        * `OPEN` - Open
+        * `CLOSED` - Closed
+        * `CANCELLED` - Cancelled
     LeaveRequest:
       type: object
       description: Serialize employee leave requests.
@@ -1391,6 +3325,7 @@ components:
           readOnly: true
         employee:
           type: integer
+          readOnly: true
         leave_type:
           $ref: '#/components/schemas/LeaveTypeEnum'
         start_date:
@@ -1475,6 +3410,353 @@ components:
           description: Refresh token to invalidate.
       required:
       - refresh
+    OnboardingJourney:
+      type: object
+      description: Serialize onboarding journeys for authorized API clients.
+      properties:
+        id:
+          type: string
+          format: uuid
+          readOnly: true
+        template_version:
+          type: integer
+          maximum: 2147483647
+          minimum: 0
+        status:
+          allOf:
+          - $ref: '#/components/schemas/OnboardingJourneyStatusEnum'
+          readOnly: true
+        started_at:
+          type: string
+          format: date-time
+          readOnly: true
+          nullable: true
+        target_completion_date:
+          type: string
+          format: date
+          nullable: true
+        completed_at:
+          type: string
+          format: date-time
+          readOnly: true
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+          readOnly: true
+        updated_at:
+          type: string
+          format: date-time
+          readOnly: true
+        employee:
+          type: integer
+          readOnly: true
+        template:
+          type: string
+          format: uuid
+          readOnly: true
+        created_by:
+          type: integer
+          readOnly: true
+      required:
+      - completed_at
+      - created_at
+      - created_by
+      - employee
+      - id
+      - started_at
+      - status
+      - template
+      - template_version
+      - updated_at
+    OnboardingJourneyMetrics:
+      type: object
+      properties:
+        total:
+          type: integer
+        pending:
+          type: integer
+        in_progress:
+          type: integer
+        suspended:
+          type: integer
+        completed:
+          type: integer
+        cancelled:
+          type: integer
+      required:
+      - cancelled
+      - completed
+      - in_progress
+      - pending
+      - suspended
+      - total
+    OnboardingJourneyStatusEnum:
+      enum:
+      - PENDING
+      - IN_PROGRESS
+      - SUSPENDED
+      - COMPLETED
+      - CANCELLED
+      type: string
+      description: |-
+        * `PENDING` - Pending
+        * `IN_PROGRESS` - In progress
+        * `SUSPENDED` - Suspended
+        * `COMPLETED` - Completed
+        * `CANCELLED` - Cancelled
+    OnboardingMetrics:
+      type: object
+      properties:
+        journeys:
+          $ref: '#/components/schemas/OnboardingJourneyMetrics'
+        tasks:
+          $ref: '#/components/schemas/OnboardingTaskMetrics'
+        progress:
+          $ref: '#/components/schemas/OnboardingProgress'
+        as_of:
+          type: string
+          format: date
+      required:
+      - as_of
+      - journeys
+      - progress
+      - tasks
+    OnboardingProgress:
+      type: object
+      properties:
+        total_eligible_tasks:
+          type: integer
+        completed_tasks:
+          type: integer
+        percentage:
+          type: number
+          format: double
+      required:
+      - completed_tasks
+      - percentage
+      - total_eligible_tasks
+    OnboardingTask:
+      type: object
+      description: Serialize onboarding tasks without allowing direct status changes.
+      properties:
+        id:
+          type: string
+          format: uuid
+          readOnly: true
+        title:
+          type: string
+          maxLength: 200
+        description:
+          type: string
+        status:
+          allOf:
+          - $ref: '#/components/schemas/OnboardingTaskStatusEnum'
+          readOnly: true
+        priority:
+          $ref: '#/components/schemas/PriorityEnum'
+        due_date:
+          type: string
+          format: date
+          nullable: true
+        started_at:
+          type: string
+          format: date-time
+          readOnly: true
+          nullable: true
+        completed_at:
+          type: string
+          format: date-time
+          readOnly: true
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+          readOnly: true
+        updated_at:
+          type: string
+          format: date-time
+          readOnly: true
+        journey:
+          type: string
+          format: uuid
+        activity_template:
+          type: string
+          format: uuid
+        assigned_to:
+          type: integer
+          nullable: true
+      required:
+      - activity_template
+      - completed_at
+      - created_at
+      - id
+      - journey
+      - started_at
+      - status
+      - title
+      - updated_at
+    OnboardingTaskAssignment:
+      type: object
+      description: Validate the assignee identifier for a task assignment.
+      properties:
+        assigned_to_id:
+          type: integer
+          minimum: 1
+      required:
+      - assigned_to_id
+    OnboardingTaskMetrics:
+      type: object
+      properties:
+        total:
+          type: integer
+        pending:
+          type: integer
+        in_progress:
+          type: integer
+        blocked:
+          type: integer
+        completed:
+          type: integer
+        cancelled:
+          type: integer
+        overdue:
+          type: integer
+        low_priority:
+          type: integer
+        medium_priority:
+          type: integer
+        high_priority:
+          type: integer
+        urgent_priority:
+          type: integer
+      required:
+      - blocked
+      - cancelled
+      - completed
+      - high_priority
+      - in_progress
+      - low_priority
+      - medium_priority
+      - overdue
+      - pending
+      - total
+      - urgent_priority
+    OnboardingTaskStatusEnum:
+      enum:
+      - PENDING
+      - IN_PROGRESS
+      - BLOCKED
+      - COMPLETED
+      - CANCELLED
+      type: string
+      description: |-
+        * `PENDING` - Pending
+        * `IN_PROGRESS` - In progress
+        * `BLOCKED` - Blocked
+        * `COMPLETED` - Completed
+        * `CANCELLED` - Cancelled
+    OnboardingTaskTransition:
+      type: object
+      description: Validate a requested onboarding task status transition.
+      properties:
+        target_status:
+          $ref: '#/components/schemas/OnboardingTaskStatusEnum'
+      required:
+      - target_status
+    OperationsDailyActivity:
+      type: object
+      properties:
+        created_at__date:
+          type: string
+          format: date
+        count:
+          type: integer
+      required:
+      - count
+      - created_at__date
+    OperationsEventDistribution:
+      type: object
+      properties:
+        event_type:
+          type: string
+        count:
+          type: integer
+      required:
+      - count
+      - event_type
+    OperationsEvents:
+      type: object
+      properties:
+        distribution:
+          type: array
+          items:
+            $ref: '#/components/schemas/OperationsEventDistribution'
+      required:
+      - distribution
+    OperationsMetrics:
+      type: object
+      properties:
+        as_of:
+          type: string
+          format: date
+        period_days:
+          type: integer
+        workflows:
+          $ref: '#/components/schemas/OperationsWorkflowMetrics'
+        notifications:
+          $ref: '#/components/schemas/OperationsNotifications'
+        events:
+          $ref: '#/components/schemas/OperationsEvents'
+        daily_activity:
+          type: array
+          items:
+            $ref: '#/components/schemas/OperationsDailyActivity'
+      required:
+      - as_of
+      - daily_activity
+      - events
+      - notifications
+      - period_days
+      - workflows
+    OperationsNotificationType:
+      type: object
+      properties:
+        details__notification_type:
+          type: string
+        count:
+          type: integer
+      required:
+      - count
+      - details__notification_type
+    OperationsNotifications:
+      type: object
+      properties:
+        failed:
+          type: integer
+        by_type:
+          type: array
+          items:
+            $ref: '#/components/schemas/OperationsNotificationType'
+      required:
+      - by_type
+      - failed
+    OperationsWorkflowMetrics:
+      type: object
+      properties:
+        total:
+          type: integer
+        success:
+          type: integer
+        failure:
+          type: integer
+        denied:
+          type: integer
+      required:
+      - denied
+      - failure
+      - success
+      - total
     PaginatedBankAccountList:
       type: object
       required:
@@ -1498,6 +3780,52 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/BankAccount'
+    PaginatedCandidateList:
+      type: object
+      required:
+      - count
+      - results
+      properties:
+        count:
+          type: integer
+          example: 123
+        next:
+          type: string
+          nullable: true
+          format: uri
+          example: http://api.example.org/accounts/?page=4
+        previous:
+          type: string
+          nullable: true
+          format: uri
+          example: http://api.example.org/accounts/?page=2
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/Candidate'
+    PaginatedDocumentAccessLogList:
+      type: object
+      required:
+      - count
+      - results
+      properties:
+        count:
+          type: integer
+          example: 123
+        next:
+          type: string
+          nullable: true
+          format: uri
+          example: http://api.example.org/accounts/?page=4
+        previous:
+          type: string
+          nullable: true
+          format: uri
+          example: http://api.example.org/accounts/?page=2
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/DocumentAccessLog'
     PaginatedEmployeeProfileList:
       type: object
       required:
@@ -1521,6 +3849,52 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/EmployeeProfile'
+    PaginatedHRDocumentList:
+      type: object
+      required:
+      - count
+      - results
+      properties:
+        count:
+          type: integer
+          example: 123
+        next:
+          type: string
+          nullable: true
+          format: uri
+          example: http://api.example.org/accounts/?page=4
+        previous:
+          type: string
+          nullable: true
+          format: uri
+          example: http://api.example.org/accounts/?page=2
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/HRDocument'
+    PaginatedJobApplicationList:
+      type: object
+      required:
+      - count
+      - results
+      properties:
+        count:
+          type: integer
+          example: 123
+        next:
+          type: string
+          nullable: true
+          format: uri
+          example: http://api.example.org/accounts/?page=4
+        previous:
+          type: string
+          nullable: true
+          format: uri
+          example: http://api.example.org/accounts/?page=2
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/JobApplication'
     PaginatedLeaveRequestList:
       type: object
       required:
@@ -1544,6 +3918,52 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/LeaveRequest'
+    PaginatedOnboardingJourneyList:
+      type: object
+      required:
+      - count
+      - results
+      properties:
+        count:
+          type: integer
+          example: 123
+        next:
+          type: string
+          nullable: true
+          format: uri
+          example: http://api.example.org/accounts/?page=4
+        previous:
+          type: string
+          nullable: true
+          format: uri
+          example: http://api.example.org/accounts/?page=2
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/OnboardingJourney'
+    PaginatedOnboardingTaskList:
+      type: object
+      required:
+      - count
+      - results
+      properties:
+        count:
+          type: integer
+          example: 123
+        next:
+          type: string
+          nullable: true
+          format: uri
+          example: http://api.example.org/accounts/?page=4
+        previous:
+          type: string
+          nullable: true
+          format: uri
+          example: http://api.example.org/accounts/?page=2
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/OnboardingTask'
     PaginatedPerformanceReviewList:
       type: object
       required:
@@ -1567,6 +3987,29 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/PerformanceReview'
+    PaginatedPublicJobPostingList:
+      type: object
+      required:
+      - count
+      - results
+      properties:
+        count:
+          type: integer
+          example: 123
+        next:
+          type: string
+          nullable: true
+          format: uri
+          example: http://api.example.org/accounts/?page=4
+        previous:
+          type: string
+          nullable: true
+          format: uri
+          example: http://api.example.org/accounts/?page=2
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/PublicJobPosting'
     PasswordChange:
       type: object
       description: Validate a password change for an authenticated user.
@@ -1659,6 +4102,52 @@ components:
           type: string
           format: date-time
           readOnly: true
+    PatchedCandidate:
+      type: object
+      description: Serialize candidate profiles.
+      properties:
+        id:
+          type: string
+          format: uuid
+          readOnly: true
+        department:
+          type: integer
+          readOnly: true
+        first_name:
+          type: string
+          maxLength: 100
+        last_name:
+          type: string
+          maxLength: 100
+        email:
+          type: string
+          format: email
+          maxLength: 255
+        phone:
+          type: string
+          maxLength: 30
+        linkedin_url:
+          oneOf:
+          - type: string
+            format: uri
+            maxLength: 200
+          - type: string
+            maxLength: 0
+        portfolio_url:
+          oneOf:
+          - type: string
+            format: uri
+            maxLength: 200
+          - type: string
+            maxLength: 0
+        created_at:
+          type: string
+          format: date-time
+          readOnly: true
+        updated_at:
+          type: string
+          format: date-time
+          readOnly: true
     PatchedEmployeeProfile:
       type: object
       description: Serialize employee HR profile data.
@@ -1695,6 +4184,130 @@ components:
           type: string
           format: date-time
           readOnly: true
+    PatchedHRDocument:
+      type: object
+      description: Serialize HR document metadata without exposing storage details.
+      properties:
+        id:
+          type: string
+          format: uuid
+          readOnly: true
+        employee:
+          type: integer
+          readOnly: true
+        title:
+          type: string
+          maxLength: 200
+        document_file:
+          type: string
+          format: uri
+          writeOnly: true
+        document_type:
+          $ref: '#/components/schemas/DocumentTypeEnum'
+        original_filename:
+          type: string
+          readOnly: true
+        mime_type:
+          type: string
+          readOnly: true
+        size_bytes:
+          type: integer
+          readOnly: true
+        checksum_sha256:
+          type: string
+          readOnly: true
+        status:
+          allOf:
+          - $ref: '#/components/schemas/HRDocumentStatusEnum'
+          readOnly: true
+        uploaded_by:
+          type: integer
+          readOnly: true
+        verified_by:
+          type: integer
+          readOnly: true
+          nullable: true
+        uploaded_at:
+          type: string
+          format: date-time
+          readOnly: true
+        updated_at:
+          type: string
+          format: date-time
+          readOnly: true
+        verified_at:
+          type: string
+          format: date-time
+          readOnly: true
+          nullable: true
+        rejection_reason:
+          type: string
+          readOnly: true
+        expires_at:
+          type: string
+          format: date
+          nullable: true
+        metadata: {}
+    PatchedJobPosting:
+      type: object
+      description: Serialize job postings.
+      properties:
+        id:
+          type: string
+          format: uuid
+          readOnly: true
+        title:
+          type: string
+          maxLength: 150
+        department:
+          type: integer
+        position:
+          type: integer
+        description:
+          type: string
+        responsibilities:
+          type: string
+        qualifications:
+          type: string
+        employment_type:
+          $ref: '#/components/schemas/EmploymentTypeEnum'
+        location:
+          type: string
+          maxLength: 255
+        salary_min:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,10}(?:\.\d{0,2})?$
+          nullable: true
+        salary_max:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,10}(?:\.\d{0,2})?$
+          nullable: true
+        status:
+          allOf:
+          - $ref: '#/components/schemas/JobPostingStatusEnum'
+          readOnly: true
+        application_deadline:
+          type: string
+          format: date
+          nullable: true
+        published_at:
+          type: string
+          format: date-time
+          readOnly: true
+          nullable: true
+        created_by:
+          type: integer
+          readOnly: true
+        created_at:
+          type: string
+          format: date-time
+          readOnly: true
+        updated_at:
+          type: string
+          format: date-time
+          readOnly: true
     PatchedLeaveRequest:
       type: object
       description: Serialize employee leave requests.
@@ -1704,6 +4317,7 @@ components:
           readOnly: true
         employee:
           type: integer
+          readOnly: true
         leave_type:
           $ref: '#/components/schemas/LeaveTypeEnum'
         start_date:
@@ -1846,6 +4460,281 @@ components:
         * `DRAFT` - Draft
         * `SUBMITTED` - Submitted
         * `ACKNOWLEDGED` - Acknowledged
+    PriorityEnum:
+      enum:
+      - LOW
+      - MEDIUM
+      - HIGH
+      - URGENT
+      type: string
+      description: |-
+        * `LOW` - Low
+        * `MEDIUM` - Medium
+        * `HIGH` - High
+        * `URGENT` - Urgent
+    PublicJobPosting:
+      type: object
+      description: Expose only the information candidates need to view open jobs.
+      properties:
+        id:
+          type: string
+          format: uuid
+          readOnly: true
+        title:
+          type: string
+          readOnly: true
+        department:
+          type: integer
+          readOnly: true
+        position:
+          type: integer
+          readOnly: true
+        description:
+          type: string
+          readOnly: true
+        responsibilities:
+          type: string
+          readOnly: true
+        qualifications:
+          type: string
+          readOnly: true
+        employment_type:
+          allOf:
+          - $ref: '#/components/schemas/EmploymentTypeEnum'
+          readOnly: true
+        location:
+          type: string
+          readOnly: true
+        salary_min:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,10}(?:\.\d{0,2})?$
+          readOnly: true
+          nullable: true
+        salary_max:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,10}(?:\.\d{0,2})?$
+          readOnly: true
+          nullable: true
+        application_deadline:
+          type: string
+          format: date
+          readOnly: true
+          nullable: true
+        published_at:
+          type: string
+          format: date-time
+          readOnly: true
+          nullable: true
+      required:
+      - application_deadline
+      - department
+      - description
+      - employment_type
+      - id
+      - location
+      - position
+      - published_at
+      - qualifications
+      - responsibilities
+      - salary_max
+      - salary_min
+      - title
+    RiskCompliance:
+      type: object
+      properties:
+        incomplete_profiles:
+          type: integer
+        employees_missing_required_documents:
+          type: integer
+        expired_documents:
+          type: integer
+        documents_expiring_soon:
+          type: integer
+      required:
+      - documents_expiring_soon
+      - employees_missing_required_documents
+      - expired_documents
+      - incomplete_profiles
+    RiskDocumentLifecycle:
+      type: object
+      properties:
+        pending_scan:
+          type: integer
+        pending_review:
+          type: integer
+        quarantined:
+          type: integer
+        rejected:
+          type: integer
+        verified:
+          type: integer
+        archived:
+          type: integer
+      required:
+      - archived
+      - pending_review
+      - pending_scan
+      - quarantined
+      - rejected
+      - verified
+    RiskMetrics:
+      type: object
+      properties:
+        as_of:
+          type: string
+          format: date
+        compliance:
+          $ref: '#/components/schemas/RiskCompliance'
+        document_lifecycle:
+          $ref: '#/components/schemas/RiskDocumentLifecycle'
+        security:
+          $ref: '#/components/schemas/RiskSecurity'
+      required:
+      - as_of
+      - compliance
+      - document_lifecycle
+      - security
+    RiskSecurity:
+      type: object
+      properties:
+        brute_force:
+          type: integer
+        suspicious_ip:
+          type: integer
+        unauthorized_access:
+          type: integer
+        privilege_escalation:
+          type: integer
+      required:
+      - brute_force
+      - privilege_escalation
+      - suspicious_ip
+      - unauthorized_access
+    SecurityDailyActivity:
+      type: object
+      properties:
+        created_at__date:
+          type: string
+          format: date
+        count:
+          type: integer
+      required:
+      - count
+      - created_at__date
+    SecurityDetections:
+      type: object
+      properties:
+        brute_force:
+          type: integer
+        suspicious_ip:
+          type: integer
+        unauthorized_access:
+          type: integer
+        privilege_escalation:
+          type: integer
+      required:
+      - brute_force
+      - privilege_escalation
+      - suspicious_ip
+      - unauthorized_access
+    SecurityEventDistribution:
+      type: object
+      properties:
+        event_type:
+          type: string
+        count:
+          type: integer
+      required:
+      - count
+      - event_type
+    SecurityEvents:
+      type: object
+      properties:
+        distribution:
+          type: array
+          items:
+            $ref: '#/components/schemas/SecurityEventDistribution'
+      required:
+      - distribution
+    SecurityMetrics:
+      type: object
+      properties:
+        as_of:
+          type: string
+          format: date
+        period_days:
+          type: integer
+        overview:
+          $ref: '#/components/schemas/SecurityOverview'
+        detections:
+          $ref: '#/components/schemas/SecurityDetections'
+        sources:
+          $ref: '#/components/schemas/SecuritySources'
+        events:
+          $ref: '#/components/schemas/SecurityEvents'
+        daily_activity:
+          type: array
+          items:
+            $ref: '#/components/schemas/SecurityDailyActivity'
+        recent_events:
+          type: array
+          items:
+            $ref: '#/components/schemas/SecurityRecentEvent'
+      required:
+      - as_of
+      - daily_activity
+      - detections
+      - events
+      - overview
+      - period_days
+      - recent_events
+      - sources
+    SecurityOverview:
+      type: object
+      properties:
+        total_events:
+          type: integer
+        login_success:
+          type: integer
+        login_failed:
+          type: integer
+      required:
+      - login_failed
+      - login_success
+      - total_events
+    SecurityRecentEvent:
+      type: object
+      properties:
+        id:
+          type: integer
+        event_type:
+          type: string
+        ip_address:
+          type: string
+          nullable: true
+        request_path:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+      required:
+      - created_at
+      - event_type
+      - id
+      - ip_address
+      - request_path
+    SecuritySources:
+      type: object
+      properties:
+        distinct_ips:
+          type: integer
+        distinct_users:
+          type: integer
+      required:
+      - distinct_ips
+      - distinct_users
     TokenRefresh:
       type: object
       properties:
@@ -1910,6 +4799,120 @@ components:
       - name
       - password
       - password_confirm
+    WorkforceDepartmentDistribution:
+      type: object
+      properties:
+        department_id:
+          type: integer
+        department__name:
+          type: string
+        department__code:
+          type: string
+        employee_count:
+          type: integer
+      required:
+      - department__code
+      - department__name
+      - department_id
+      - employee_count
+    WorkforceDepartmentMetrics:
+      type: object
+      properties:
+        total:
+          type: integer
+        distribution:
+          type: array
+          items:
+            $ref: '#/components/schemas/WorkforceDepartmentDistribution'
+      required:
+      - distribution
+      - total
+    WorkforceHeadcount:
+      type: object
+      properties:
+        total:
+          type: integer
+        active_accounts:
+          type: integer
+        inactive_accounts:
+          type: integer
+      required:
+      - active_accounts
+      - inactive_accounts
+      - total
+    WorkforceHires:
+      type: object
+      properties:
+        this_month:
+          type: integer
+        this_year:
+          type: integer
+      required:
+      - this_month
+      - this_year
+    WorkforceMetrics:
+      type: object
+      properties:
+        headcount:
+          $ref: '#/components/schemas/WorkforceHeadcount'
+        departments:
+          $ref: '#/components/schemas/WorkforceDepartmentMetrics'
+        positions:
+          $ref: '#/components/schemas/WorkforcePositionMetrics'
+        roles:
+          type: array
+          items:
+            $ref: '#/components/schemas/WorkforceRoleDistribution'
+        hires:
+          $ref: '#/components/schemas/WorkforceHires'
+        as_of:
+          type: string
+          format: date
+      required:
+      - as_of
+      - departments
+      - headcount
+      - hires
+      - positions
+      - roles
+    WorkforcePositionDistribution:
+      type: object
+      properties:
+        position_id:
+          type: integer
+        position__title:
+          type: string
+        department__name:
+          type: string
+        employee_count:
+          type: integer
+      required:
+      - department__name
+      - employee_count
+      - position__title
+      - position_id
+    WorkforcePositionMetrics:
+      type: object
+      properties:
+        total:
+          type: integer
+        distribution:
+          type: array
+          items:
+            $ref: '#/components/schemas/WorkforcePositionDistribution'
+      required:
+      - distribution
+      - total
+    WorkforceRoleDistribution:
+      type: object
+      properties:
+        user__role:
+          type: string
+        employee_count:
+          type: integer
+      required:
+      - employee_count
+      - user__role
   securitySchemes:
     jwtAuth:
       type: http

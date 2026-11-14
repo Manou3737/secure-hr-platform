@@ -1,0 +1,3137 @@
+openapi: 3.0.3
+info:
+  title: Secure HR Platform API
+  version: 1.0.0
+  description: Secure Human Resources Platform API for employee management, HR operations,
+    and security-conscious access to sensitive data.
+paths:
+  /api/v1/auth/account-status/{id}/:
+    patch:
+      operationId: v1_auth_account_status_partial_update
+      description: Updates the active status of a user account after checking object-level
+        permissions. Records an audit entry and a security event.
+      summary: Activate or deactivate a user account
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: integer
+        description: ID of the user account.
+        required: true
+      tags:
+      - v1
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PatchedAccountStatus'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/PatchedAccountStatus'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/PatchedAccountStatus'
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          description: Account status updated successfully.
+        '400':
+          description: The submitted account status is invalid.
+        '401':
+          description: Authentication is required.
+        '403':
+          description: You do not have permission to change this account.
+        '404':
+          description: User account not found.
+  /api/v1/auth/login/:
+    post:
+      operationId: v1_auth_login_create
+      description: Authenticates a user and returns access and refresh JWT tokens.
+      summary: Authenticate a user
+      tags:
+      - v1
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AuthToken'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/AuthToken'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/AuthToken'
+        required: true
+      security:
+      - jwtAuth: []
+      - {}
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LoginResponse'
+          description: ''
+        '400':
+          description: Invalid login credentials or request.
+  /api/v1/auth/logout/:
+    post:
+      operationId: v1_auth_logout_create
+      description: Invalidates a refresh token by adding it to the token blacklist.
+      summary: Log out a user
+      tags:
+      - v1
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LogoutRequest'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/LogoutRequest'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/LogoutRequest'
+        required: true
+      security:
+      - jwtAuth: []
+      - {}
+      responses:
+        '205':
+          description: Successfully logged out.
+        '400':
+          description: Refresh token is missing, invalid, or expired.
+  /api/v1/auth/me/:
+    get:
+      operationId: v1_auth_me_retrieve
+      description: Returns the account information of the currently authenticated
+        user.
+      summary: Retrieve the current user's account
+      tags:
+      - v1
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserAccount'
+          description: ''
+        '401':
+          description: Authentication is required.
+  /api/v1/auth/password-change/:
+    post:
+      operationId: v1_auth_password_change_create
+      description: Changes the authenticated user's password after validating the
+        supplied credentials. Records a security event and an audit entry.
+      summary: Change the current user's password
+      tags:
+      - v1
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PasswordChange'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/PasswordChange'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/PasswordChange'
+        required: true
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          description: Password changed successfully.
+        '400':
+          description: The submitted password data is invalid.
+        '401':
+          description: Authentication is required.
+  /api/v1/auth/password-reset/:
+    post:
+      operationId: v1_auth_password_reset_create
+      description: Sends a password reset link when an account exists for the submitted
+        email. The response does not reveal whether the account exists.
+      summary: Request a password reset
+      tags:
+      - v1
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PasswordResetRequest'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/PasswordResetRequest'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/PasswordResetRequest'
+        required: true
+      security:
+      - jwtAuth: []
+      - {}
+      responses:
+        '200':
+          description: A generic response confirming that the request was processed.
+        '400':
+          description: The submitted email data is invalid.
+  /api/v1/auth/password-reset-confirm/:
+    post:
+      operationId: v1_auth_password_reset_confirm_create
+      description: Resets a user's password after validating the password reset credentials.
+      summary: Confirm a password reset
+      tags:
+      - v1
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PasswordResetConfirm'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/PasswordResetConfirm'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/PasswordResetConfirm'
+        required: true
+      security:
+      - jwtAuth: []
+      - {}
+      responses:
+        '200':
+          description: Password reset successfully.
+        '400':
+          description: The reset credentials or password data are invalid or expired.
+  /api/v1/auth/privileges/{id}/:
+    patch:
+      operationId: v1_auth_privileges_partial_update
+      description: Updates the administrative privileges of a user. Restricted to
+        administrators.
+      summary: Update user privileges
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: integer
+        description: ID of the user account.
+        required: true
+      tags:
+      - v1
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PatchedUserPrivilege'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/PatchedUserPrivilege'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/PatchedUserPrivilege'
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          description: User privileges updated successfully.
+        '400':
+          description: The submitted privilege data is invalid.
+        '401':
+          description: Authentication is required.
+        '403':
+          description: Administrator permissions are required.
+        '404':
+          description: User account not found.
+  /api/v1/auth/refresh/:
+    post:
+      operationId: v1_auth_refresh_create
+      description: |-
+        Takes a refresh type JSON web token and returns an access type JSON web
+        token if the refresh token is valid.
+      tags:
+      - v1
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TokenRefresh'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/TokenRefresh'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/TokenRefresh'
+        required: true
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokenRefresh'
+          description: ''
+  /api/v1/auth/register/:
+    post:
+      operationId: v1_auth_register_create
+      description: Handles user registration.
+      tags:
+      - v1
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UserRegistration'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/UserRegistration'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/UserRegistration'
+        required: true
+      security:
+      - jwtAuth: []
+      - {}
+      responses:
+        '201':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserRegistration'
+          description: ''
+  /api/v1/auth/verify-email/:
+    get:
+      operationId: v1_auth_verify_email_list
+      description: Verifies a user's email address using the UID and token provided
+        in the verification link.
+      summary: Verify an email address
+      parameters:
+      - in: query
+        name: token
+        schema:
+          type: string
+        description: Email verification token.
+        required: true
+      - in: query
+        name: uid
+        schema:
+          type: string
+        description: Base64-encoded user identifier.
+        required: true
+      tags:
+      - v1
+      security:
+      - jwtAuth: []
+      - {}
+      responses:
+        '200':
+          description: Email address verified successfully.
+        '400':
+          description: Missing, invalid, or expired verification credentials.
+  /api/v1/employees/:
+    get:
+      operationId: v1_employees_list
+      description: API endpoint for managing employee profiles.
+      parameters:
+      - in: query
+        name: department
+        schema:
+          type: integer
+      - in: query
+        name: hire_date
+        schema:
+          type: string
+          format: date
+      - name: ordering
+        required: false
+        in: query
+        description: Which field to use when ordering the results.
+        schema:
+          type: string
+      - name: page
+        required: false
+        in: query
+        description: A page number within the paginated result set.
+        schema:
+          type: integer
+      - name: page_size
+        required: false
+        in: query
+        description: Number of results to return per page.
+        schema:
+          type: integer
+      - in: query
+        name: position
+        schema:
+          type: integer
+      tags:
+      - v1
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaginatedEmployeeProfileList'
+          description: ''
+    post:
+      operationId: v1_employees_create
+      description: API endpoint for managing employee profiles.
+      tags:
+      - v1
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EmployeeProfile'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/EmployeeProfile'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/EmployeeProfile'
+        required: true
+      security:
+      - jwtAuth: []
+      responses:
+        '201':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EmployeeProfile'
+          description: ''
+  /api/v1/employees/{id}/:
+    get:
+      operationId: v1_employees_retrieve
+      description: API endpoint for managing employee profiles.
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: integer
+        description: A unique integer value identifying this employee profile.
+        required: true
+      tags:
+      - v1
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EmployeeProfile'
+          description: ''
+    put:
+      operationId: v1_employees_update
+      description: API endpoint for managing employee profiles.
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: integer
+        description: A unique integer value identifying this employee profile.
+        required: true
+      tags:
+      - v1
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EmployeeProfile'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/EmployeeProfile'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/EmployeeProfile'
+        required: true
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EmployeeProfile'
+          description: ''
+    patch:
+      operationId: v1_employees_partial_update
+      description: API endpoint for managing employee profiles.
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: integer
+        description: A unique integer value identifying this employee profile.
+        required: true
+      tags:
+      - v1
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PatchedEmployeeProfile'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/PatchedEmployeeProfile'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/PatchedEmployeeProfile'
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EmployeeProfile'
+          description: ''
+    delete:
+      operationId: v1_employees_destroy
+      description: API endpoint for managing employee profiles.
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: integer
+        description: A unique integer value identifying this employee profile.
+        required: true
+      tags:
+      - v1
+      security:
+      - jwtAuth: []
+      responses:
+        '204':
+          description: No response body
+  /api/v1/employees/bank-accounts/:
+    get:
+      operationId: v1_employees_bank_accounts_list
+      description: Manage employee bank account information securely.
+      parameters:
+      - in: query
+        name: account_type
+        schema:
+          type: string
+          enum:
+          - CHECKING
+          - SAVINGS
+        description: |-
+          * `CHECKING` - Checking
+          * `SAVINGS` - Savings
+      - in: query
+        name: employee
+        schema:
+          type: integer
+      - in: query
+        name: is_primary
+        schema:
+          type: boolean
+      - in: query
+        name: is_verified
+        schema:
+          type: boolean
+      - name: ordering
+        required: false
+        in: query
+        description: Which field to use when ordering the results.
+        schema:
+          type: string
+      - name: page
+        required: false
+        in: query
+        description: A page number within the paginated result set.
+        schema:
+          type: integer
+      - name: page_size
+        required: false
+        in: query
+        description: Number of results to return per page.
+        schema:
+          type: integer
+      tags:
+      - v1
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaginatedBankAccountList'
+          description: ''
+    post:
+      operationId: v1_employees_bank_accounts_create
+      description: Create a bank account with secure access control.
+      tags:
+      - v1
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BankAccount'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/BankAccount'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/BankAccount'
+        required: true
+      security:
+      - jwtAuth: []
+      responses:
+        '201':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BankAccount'
+          description: ''
+  /api/v1/employees/bank-accounts/{id}/:
+    get:
+      operationId: v1_employees_bank_accounts_retrieve
+      description: Manage employee bank account information securely.
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: integer
+        description: A unique integer value identifying this bank account.
+        required: true
+      tags:
+      - v1
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BankAccount'
+          description: ''
+    put:
+      operationId: v1_employees_bank_accounts_update
+      description: Manage employee bank account information securely.
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: integer
+        description: A unique integer value identifying this bank account.
+        required: true
+      tags:
+      - v1
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BankAccount'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/BankAccount'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/BankAccount'
+        required: true
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BankAccount'
+          description: ''
+    patch:
+      operationId: v1_employees_bank_accounts_partial_update
+      description: Manage employee bank account information securely.
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: integer
+        description: A unique integer value identifying this bank account.
+        required: true
+      tags:
+      - v1
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PatchedBankAccount'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/PatchedBankAccount'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/PatchedBankAccount'
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BankAccount'
+          description: ''
+    delete:
+      operationId: v1_employees_bank_accounts_destroy
+      description: Prevent physical deletion of bank accounts.
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: integer
+        description: A unique integer value identifying this bank account.
+        required: true
+      tags:
+      - v1
+      security:
+      - jwtAuth: []
+      responses:
+        '204':
+          description: No response body
+  /api/v1/employees/dashboard/:
+    get:
+      operationId: v1_employees_dashboard_retrieve
+      description: |-
+        Validate filters, enforce department scope,
+        and return aggregated dashboard metrics.
+      tags:
+      - v1
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          description: No response body
+  /api/v1/employees/document-access-logs/:
+    get:
+      operationId: v1_employees_document_access_logs_list
+      description: Read-only API for authorized HR staff to inspect document audit
+        logs.
+      parameters:
+      - in: query
+        name: action
+        schema:
+          type: string
+          enum:
+          - ACCESS_DENIED
+          - ARCHIVE
+          - CREATE
+          - CREATE_VERSION
+          - DOWNLOAD
+          - REJECT
+          - UPDATE
+          - VERIFY
+          - VIEW
+        description: |-
+          * `VIEW` - View
+          * `DOWNLOAD` - Download
+          * `CREATE` - Create
+          * `UPDATE` - Update
+          * `VERIFY` - Verify
+          * `REJECT` - Reject
+          * `ARCHIVE` - Archive
+          * `CREATE_VERSION` - Create version
+          * `ACCESS_DENIED` - Access denied
+      - in: query
+        name: created_after
+        schema:
+          type: string
+          format: date-time
+      - in: query
+        name: created_before
+        schema:
+          type: string
+          format: date-time
+      - in: query
+        name: document
+        schema:
+          type: string
+          format: uuid
+      - name: ordering
+        required: false
+        in: query
+        description: Which field to use when ordering the results.
+        schema:
+          type: string
+      - name: page
+        required: false
+        in: query
+        description: A page number within the paginated result set.
+        schema:
+          type: integer
+      - name: page_size
+        required: false
+        in: query
+        description: Number of results to return per page.
+        schema:
+          type: integer
+      - name: search
+        required: false
+        in: query
+        description: A search term.
+        schema:
+          type: string
+      - in: query
+        name: user
+        schema:
+          type: number
+      tags:
+      - v1
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaginatedDocumentAccessLogList'
+          description: ''
+  /api/v1/employees/document-access-logs/{id}/:
+    get:
+      operationId: v1_employees_document_access_logs_retrieve
+      description: Read-only API for authorized HR staff to inspect document audit
+        logs.
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: integer
+        description: A unique integer value identifying this document access log.
+        required: true
+      tags:
+      - v1
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DocumentAccessLog'
+          description: ''
+  /api/v1/employees/hr-documents/:
+    get:
+      operationId: v1_employees_hr_documents_list
+      description: Expose authorized HR document metadata operations.
+      parameters:
+      - in: query
+        name: document_type
+        schema:
+          type: string
+          enum:
+          - CERTIFICATION
+          - EMPLOYMENT_CONTRACT
+          - IDENTITY_DOCUMENT
+          - ONBOARDING_FORM
+          - OTHER
+          - POLICY_ACKNOWLEDGMENT
+          - TAX_FORM
+        description: |-
+          * `IDENTITY_DOCUMENT` - Identity document
+          * `EMPLOYMENT_CONTRACT` - Employment contract
+          * `TAX_FORM` - Tax form
+          * `CERTIFICATION` - Certification
+          * `POLICY_ACKNOWLEDGMENT` - Policy acknowledgment
+          * `ONBOARDING_FORM` - Onboarding form
+          * `OTHER` - Other
+      - in: query
+        name: employee
+        schema:
+          type: integer
+      - name: ordering
+        required: false
+        in: query
+        description: Which field to use when ordering the results.
+        schema:
+          type: string
+      - name: page
+        required: false
+        in: query
+        description: A page number within the paginated result set.
+        schema:
+          type: integer
+      - name: page_size
+        required: false
+        in: query
+        description: Number of results to return per page.
+        schema:
+          type: integer
+      - in: query
+        name: status
+        schema:
+          type: string
+          enum:
+          - ARCHIVED
+          - PENDING_REVIEW
+          - PENDING_SCAN
+          - QUARANTINED
+          - REJECTED
+          - VERIFIED
+        description: |-
+          * `PENDING_SCAN` - Pending antivirus scan
+          * `PENDING_REVIEW` - Pending HR review
+          * `VERIFIED` - Verified
+          * `QUARANTINED` - Quarantined
+          * `REJECTED` - Rejected
+          * `ARCHIVED` - Archived
+      tags:
+      - v1
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaginatedHRDocumentList'
+          description: ''
+    post:
+      operationId: v1_employees_hr_documents_create
+      description: Expose authorized HR document metadata operations.
+      tags:
+      - v1
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/HRDocument'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/HRDocument'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/HRDocument'
+        required: true
+      security:
+      - jwtAuth: []
+      responses:
+        '201':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HRDocument'
+          description: ''
+  /api/v1/employees/hr-documents/{id}/:
+    get:
+      operationId: v1_employees_hr_documents_retrieve
+      description: Retrieve document metadata and record the access.
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: string
+          format: uuid
+        description: A UUID string identifying this hr document.
+        required: true
+      tags:
+      - v1
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HRDocument'
+          description: ''
+    put:
+      operationId: v1_employees_hr_documents_update
+      description: Expose authorized HR document metadata operations.
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: string
+          format: uuid
+        description: A UUID string identifying this hr document.
+        required: true
+      tags:
+      - v1
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/HRDocument'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/HRDocument'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/HRDocument'
+        required: true
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HRDocument'
+          description: ''
+    patch:
+      operationId: v1_employees_hr_documents_partial_update
+      description: Expose authorized HR document metadata operations.
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: string
+          format: uuid
+        description: A UUID string identifying this hr document.
+        required: true
+      tags:
+      - v1
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PatchedHRDocument'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/PatchedHRDocument'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/PatchedHRDocument'
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HRDocument'
+          description: ''
+  /api/v1/employees/hr-documents/{id}/archive/:
+    post:
+      operationId: v1_employees_hr_documents_archive_create
+      description: Archive a verified or rejected HR document.
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: string
+          format: uuid
+        description: A UUID string identifying this hr document.
+        required: true
+      tags:
+      - v1
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/HRDocument'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/HRDocument'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/HRDocument'
+        required: true
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HRDocument'
+          description: ''
+  /api/v1/employees/hr-documents/{id}/create-version/:
+    post:
+      operationId: v1_employees_hr_documents_create_version_create
+      description: Create a new private version of an accessible HR document.
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: string
+          format: uuid
+        description: A UUID string identifying this hr document.
+        required: true
+      tags:
+      - v1
+      requestBody:
+        content:
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/HRDocument'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/HRDocument'
+        required: true
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HRDocument'
+          description: ''
+  /api/v1/employees/hr-documents/{id}/download/:
+    get:
+      operationId: v1_employees_hr_documents_download_retrieve
+      description: Download a verified HR document as an attachment.
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: string
+          format: uuid
+        description: A UUID string identifying this hr document.
+        required: true
+      tags:
+      - v1
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HRDocument'
+          description: ''
+  /api/v1/employees/hr-documents/{id}/reject/:
+    post:
+      operationId: v1_employees_hr_documents_reject_create
+      description: Reject a document and record the review decision.
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: string
+          format: uuid
+        description: A UUID string identifying this hr document.
+        required: true
+      tags:
+      - v1
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/HRDocument'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/HRDocument'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/HRDocument'
+        required: true
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HRDocument'
+          description: ''
+  /api/v1/employees/hr-documents/{id}/reviews/:
+    get:
+      operationId: v1_employees_hr_documents_reviews_retrieve
+      description: List review history for an accessible HR document.
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: string
+          format: uuid
+        description: A UUID string identifying this hr document.
+        required: true
+      tags:
+      - v1
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HRDocument'
+          description: ''
+  /api/v1/employees/hr-documents/{id}/verify/:
+    post:
+      operationId: v1_employees_hr_documents_verify_create
+      description: Verify a document pending HR review and record the decision.
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: string
+          format: uuid
+        description: A UUID string identifying this hr document.
+        required: true
+      tags:
+      - v1
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/HRDocument'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/HRDocument'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/HRDocument'
+        required: true
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HRDocument'
+          description: ''
+  /api/v1/employees/hr-documents/{id}/versions/:
+    get:
+      operationId: v1_employees_hr_documents_versions_retrieve
+      description: List version metadata for an accessible HR document.
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: string
+          format: uuid
+        description: A UUID string identifying this hr document.
+        required: true
+      tags:
+      - v1
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HRDocument'
+          description: ''
+  /api/v1/employees/leave-requests/:
+    get:
+      operationId: v1_employees_leave_requests_list
+      description: API endpoint for managing employee leave requests.
+      parameters:
+      - in: query
+        name: employee
+        schema:
+          type: integer
+      - in: query
+        name: end_date
+        schema:
+          type: string
+          format: date
+      - in: query
+        name: leave_type
+        schema:
+          type: string
+          enum:
+          - OTHER
+          - PERSONAL
+          - SICK
+          - VACATION
+        description: |-
+          * `VACATION` - Vacation
+          * `SICK` - Sick
+          * `PERSONAL` - Personal
+          * `OTHER` - Other
+      - name: ordering
+        required: false
+        in: query
+        description: Which field to use when ordering the results.
+        schema:
+          type: string
+      - name: page
+        required: false
+        in: query
+        description: A page number within the paginated result set.
+        schema:
+          type: integer
+      - name: page_size
+        required: false
+        in: query
+        description: Number of results to return per page.
+        schema:
+          type: integer
+      - in: query
+        name: start_date
+        schema:
+          type: string
+          format: date
+      - in: query
+        name: status
+        schema:
+          type: string
+          enum:
+          - APPROVED
+          - CANCELLED
+          - PENDING
+          - REJECTED
+        description: |-
+          * `PENDING` - Pending
+          * `APPROVED` - Approved
+          * `REJECTED` - Rejected
+          * `CANCELLED` - Cancelled
+      tags:
+      - v1
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaginatedLeaveRequestList'
+          description: ''
+    post:
+      operationId: v1_employees_leave_requests_create
+      description: API endpoint for managing employee leave requests.
+      tags:
+      - v1
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LeaveRequest'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/LeaveRequest'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/LeaveRequest'
+        required: true
+      security:
+      - jwtAuth: []
+      responses:
+        '201':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LeaveRequest'
+          description: ''
+  /api/v1/employees/leave-requests/{id}/:
+    get:
+      operationId: v1_employees_leave_requests_retrieve
+      description: API endpoint for managing employee leave requests.
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: integer
+        description: A unique integer value identifying this leave request.
+        required: true
+      tags:
+      - v1
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LeaveRequest'
+          description: ''
+    put:
+      operationId: v1_employees_leave_requests_update
+      description: API endpoint for managing employee leave requests.
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: integer
+        description: A unique integer value identifying this leave request.
+        required: true
+      tags:
+      - v1
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LeaveRequest'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/LeaveRequest'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/LeaveRequest'
+        required: true
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LeaveRequest'
+          description: ''
+    patch:
+      operationId: v1_employees_leave_requests_partial_update
+      description: API endpoint for managing employee leave requests.
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: integer
+        description: A unique integer value identifying this leave request.
+        required: true
+      tags:
+      - v1
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PatchedLeaveRequest'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/PatchedLeaveRequest'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/PatchedLeaveRequest'
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LeaveRequest'
+          description: ''
+    delete:
+      operationId: v1_employees_leave_requests_destroy
+      description: Prevent direct deletion of leave requests.
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: integer
+        description: A unique integer value identifying this leave request.
+        required: true
+      tags:
+      - v1
+      security:
+      - jwtAuth: []
+      responses:
+        '204':
+          description: No response body
+  /api/v1/employees/leave-requests/{id}/approve/:
+    post:
+      operationId: v1_employees_leave_requests_approve_create
+      description: Approve a pending leave request.
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: integer
+        description: A unique integer value identifying this leave request.
+        required: true
+      tags:
+      - v1
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LeaveRequest'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/LeaveRequest'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/LeaveRequest'
+        required: true
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LeaveRequest'
+          description: ''
+  /api/v1/employees/leave-requests/{id}/cancel/:
+    post:
+      operationId: v1_employees_leave_requests_cancel_create
+      description: Cancel a pending leave request.
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: integer
+        description: A unique integer value identifying this leave request.
+        required: true
+      tags:
+      - v1
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LeaveRequest'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/LeaveRequest'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/LeaveRequest'
+        required: true
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LeaveRequest'
+          description: ''
+  /api/v1/employees/leave-requests/{id}/reject/:
+    post:
+      operationId: v1_employees_leave_requests_reject_create
+      description: Reject a pending leave request.
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: integer
+        description: A unique integer value identifying this leave request.
+        required: true
+      tags:
+      - v1
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LeaveRequest'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/LeaveRequest'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/LeaveRequest'
+        required: true
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LeaveRequest'
+          description: ''
+  /api/v1/employees/onboarding/journeys/:
+    get:
+      operationId: v1_employees_onboarding_journeys_list
+      description: Expose onboarding journeys with role-based queryset filtering.
+      parameters:
+      - name: page
+        required: false
+        in: query
+        description: A page number within the paginated result set.
+        schema:
+          type: integer
+      - name: page_size
+        required: false
+        in: query
+        description: Number of results to return per page.
+        schema:
+          type: integer
+      tags:
+      - v1
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaginatedOnboardingJourneyList'
+          description: ''
+  /api/v1/employees/onboarding/journeys/{id}/:
+    get:
+      operationId: v1_employees_onboarding_journeys_retrieve
+      description: Expose onboarding journeys with role-based queryset filtering.
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: string
+        required: true
+      tags:
+      - v1
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OnboardingJourney'
+          description: ''
+  /api/v1/employees/onboarding/tasks/:
+    get:
+      operationId: v1_employees_onboarding_tasks_list
+      description: Expose onboarding tasks and controlled workflow operations.
+      parameters:
+      - name: page
+        required: false
+        in: query
+        description: A page number within the paginated result set.
+        schema:
+          type: integer
+      - name: page_size
+        required: false
+        in: query
+        description: Number of results to return per page.
+        schema:
+          type: integer
+      tags:
+      - v1
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaginatedOnboardingTaskList'
+          description: ''
+  /api/v1/employees/onboarding/tasks/{id}/:
+    get:
+      operationId: v1_employees_onboarding_tasks_retrieve
+      description: Expose onboarding tasks and controlled workflow operations.
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: string
+        required: true
+      tags:
+      - v1
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OnboardingTask'
+          description: ''
+  /api/v1/employees/onboarding/tasks/{id}/assign/:
+    post:
+      operationId: v1_employees_onboarding_tasks_assign_create
+      description: Expose onboarding tasks and controlled workflow operations.
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: string
+        required: true
+      tags:
+      - v1
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OnboardingTaskAssignment'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/OnboardingTaskAssignment'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/OnboardingTaskAssignment'
+        required: true
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OnboardingTaskAssignment'
+          description: ''
+  /api/v1/employees/onboarding/tasks/{id}/transition/:
+    post:
+      operationId: v1_employees_onboarding_tasks_transition_create
+      description: Expose onboarding tasks and controlled workflow operations.
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: string
+        required: true
+      tags:
+      - v1
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OnboardingTaskTransition'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/OnboardingTaskTransition'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/OnboardingTaskTransition'
+        required: true
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OnboardingTaskTransition'
+          description: ''
+  /api/v1/employees/performance-reviews/:
+    get:
+      operationId: v1_employees_performance_reviews_list
+      description: Manage employee performance reviews securely.
+      parameters:
+      - in: query
+        name: employee
+        schema:
+          type: integer
+      - name: ordering
+        required: false
+        in: query
+        description: Which field to use when ordering the results.
+        schema:
+          type: string
+      - name: page
+        required: false
+        in: query
+        description: A page number within the paginated result set.
+        schema:
+          type: integer
+      - name: page_size
+        required: false
+        in: query
+        description: Number of results to return per page.
+        schema:
+          type: integer
+      - in: query
+        name: review_period_end
+        schema:
+          type: string
+          format: date
+      - in: query
+        name: review_period_start
+        schema:
+          type: string
+          format: date
+      - in: query
+        name: reviewer
+        schema:
+          type: integer
+      - in: query
+        name: status
+        schema:
+          type: string
+          enum:
+          - ACKNOWLEDGED
+          - DRAFT
+          - SUBMITTED
+        description: |-
+          * `DRAFT` - Draft
+          * `SUBMITTED` - Submitted
+          * `ACKNOWLEDGED` - Acknowledged
+      tags:
+      - v1
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaginatedPerformanceReviewList'
+          description: ''
+    post:
+      operationId: v1_employees_performance_reviews_create
+      description: Create a performance review securely.
+      tags:
+      - v1
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PerformanceReview'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/PerformanceReview'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/PerformanceReview'
+        required: true
+      security:
+      - jwtAuth: []
+      responses:
+        '201':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PerformanceReview'
+          description: ''
+  /api/v1/employees/performance-reviews/{id}/:
+    get:
+      operationId: v1_employees_performance_reviews_retrieve
+      description: Manage employee performance reviews securely.
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: integer
+        description: A unique integer value identifying this performance review.
+        required: true
+      tags:
+      - v1
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PerformanceReview'
+          description: ''
+    put:
+      operationId: v1_employees_performance_reviews_update
+      description: Manage employee performance reviews securely.
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: integer
+        description: A unique integer value identifying this performance review.
+        required: true
+      tags:
+      - v1
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PerformanceReview'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/PerformanceReview'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/PerformanceReview'
+        required: true
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PerformanceReview'
+          description: ''
+    patch:
+      operationId: v1_employees_performance_reviews_partial_update
+      description: Manage employee performance reviews securely.
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: integer
+        description: A unique integer value identifying this performance review.
+        required: true
+      tags:
+      - v1
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PatchedPerformanceReview'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/PatchedPerformanceReview'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/PatchedPerformanceReview'
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PerformanceReview'
+          description: ''
+    delete:
+      operationId: v1_employees_performance_reviews_destroy
+      description: Prevent physical deletion of performance reviews.
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: integer
+        description: A unique integer value identifying this performance review.
+        required: true
+      tags:
+      - v1
+      security:
+      - jwtAuth: []
+      responses:
+        '204':
+          description: No response body
+  /api/v1/employees/performance-reviews/{id}/acknowledge/:
+    post:
+      operationId: v1_employees_performance_reviews_acknowledge_create
+      description: Acknowledge a submitted performance review.
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: integer
+        description: A unique integer value identifying this performance review.
+        required: true
+      tags:
+      - v1
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PerformanceReview'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/PerformanceReview'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/PerformanceReview'
+        required: true
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PerformanceReview'
+          description: ''
+  /api/v1/employees/performance-reviews/{id}/submit/:
+    post:
+      operationId: v1_employees_performance_reviews_submit_create
+      description: Submit a draft performance review.
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: integer
+        description: A unique integer value identifying this performance review.
+        required: true
+      tags:
+      - v1
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PerformanceReview'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/PerformanceReview'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/PerformanceReview'
+        required: true
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PerformanceReview'
+          description: ''
+components:
+  schemas:
+    AccountTypeEnum:
+      enum:
+      - CHECKING
+      - SAVINGS
+      type: string
+      description: |-
+        * `CHECKING` - Checking
+        * `SAVINGS` - Savings
+    ActionEnum:
+      enum:
+      - VIEW
+      - DOWNLOAD
+      - CREATE
+      - UPDATE
+      - VERIFY
+      - REJECT
+      - ARCHIVE
+      - CREATE_VERSION
+      - ACCESS_DENIED
+      type: string
+      description: |-
+        * `VIEW` - View
+        * `DOWNLOAD` - Download
+        * `CREATE` - Create
+        * `UPDATE` - Update
+        * `VERIFY` - Verify
+        * `REJECT` - Reject
+        * `ARCHIVE` - Archive
+        * `CREATE_VERSION` - Create version
+        * `ACCESS_DENIED` - Access denied
+    AuthToken:
+      type: object
+      description: Validate user credentials for JWT authentication.
+      properties:
+        email:
+          type: string
+          format: email
+        password:
+          type: string
+          writeOnly: true
+      required:
+      - email
+      - password
+    BankAccount:
+      type: object
+      description: Serialize employee bank account data securely.
+      properties:
+        id:
+          type: integer
+          readOnly: true
+        employee:
+          type: integer
+        account_type:
+          $ref: '#/components/schemas/AccountTypeEnum'
+        routing_number:
+          type: string
+          writeOnly: true
+        account_number:
+          type: string
+          writeOnly: true
+        masked_routing_number:
+          type: string
+          description: Return only the last four digits of the routing number.
+          readOnly: true
+        masked_account_number:
+          type: string
+          description: Return only the last four digits of the account number.
+          readOnly: true
+        last_four:
+          type: string
+          readOnly: true
+        is_primary:
+          type: boolean
+        is_verified:
+          type: boolean
+          readOnly: true
+        created_at:
+          type: string
+          format: date-time
+          readOnly: true
+        updated_at:
+          type: string
+          format: date-time
+          readOnly: true
+      required:
+      - account_number
+      - account_type
+      - created_at
+      - employee
+      - id
+      - is_verified
+      - last_four
+      - masked_account_number
+      - masked_routing_number
+      - routing_number
+      - updated_at
+    DocumentAccessLog:
+      type: object
+      description: Expose audit logs as read-only records.
+      properties:
+        id:
+          type: integer
+          readOnly: true
+        document:
+          type: string
+          format: uuid
+          readOnly: true
+          nullable: true
+        document_title:
+          type: string
+          readOnly: true
+        user:
+          type: integer
+          readOnly: true
+          nullable: true
+        user_email:
+          type: string
+          readOnly: true
+        action:
+          allOf:
+          - $ref: '#/components/schemas/ActionEnum'
+          readOnly: true
+        ip_address:
+          type: string
+          readOnly: true
+          nullable: true
+        user_agent:
+          type: string
+          readOnly: true
+        request_path:
+          type: string
+          readOnly: true
+        details:
+          type: string
+          readOnly: true
+        created_at:
+          type: string
+          format: date-time
+          readOnly: true
+      required:
+      - action
+      - created_at
+      - details
+      - document
+      - document_title
+      - id
+      - ip_address
+      - request_path
+      - user
+      - user_agent
+      - user_email
+    DocumentTypeEnum:
+      enum:
+      - IDENTITY_DOCUMENT
+      - EMPLOYMENT_CONTRACT
+      - TAX_FORM
+      - CERTIFICATION
+      - POLICY_ACKNOWLEDGMENT
+      - ONBOARDING_FORM
+      - OTHER
+      type: string
+      description: |-
+        * `IDENTITY_DOCUMENT` - Identity document
+        * `EMPLOYMENT_CONTRACT` - Employment contract
+        * `TAX_FORM` - Tax form
+        * `CERTIFICATION` - Certification
+        * `POLICY_ACKNOWLEDGMENT` - Policy acknowledgment
+        * `ONBOARDING_FORM` - Onboarding form
+        * `OTHER` - Other
+    EmployeeProfile:
+      type: object
+      description: Serialize employee HR profile data.
+      properties:
+        id:
+          type: integer
+          readOnly: true
+        user:
+          type: integer
+        employee_id:
+          type: string
+          maxLength: 50
+        department:
+          type: integer
+        position:
+          type: integer
+        phone:
+          type: string
+          maxLength: 30
+        hire_date:
+          type: string
+          format: date
+        date_of_birth:
+          type: string
+          format: date
+          nullable: true
+        address:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+          readOnly: true
+        updated_at:
+          type: string
+          format: date-time
+          readOnly: true
+      required:
+      - created_at
+      - department
+      - employee_id
+      - hire_date
+      - id
+      - position
+      - updated_at
+      - user
+    HRDocument:
+      type: object
+      description: Serialize HR document metadata without exposing storage details.
+      properties:
+        id:
+          type: string
+          format: uuid
+          readOnly: true
+        employee:
+          type: integer
+          readOnly: true
+        title:
+          type: string
+          maxLength: 200
+        document_file:
+          type: string
+          format: uri
+          writeOnly: true
+        document_type:
+          $ref: '#/components/schemas/DocumentTypeEnum'
+        original_filename:
+          type: string
+          readOnly: true
+        mime_type:
+          type: string
+          readOnly: true
+        size_bytes:
+          type: integer
+          readOnly: true
+        checksum_sha256:
+          type: string
+          readOnly: true
+        status:
+          allOf:
+          - $ref: '#/components/schemas/HRDocumentStatusEnum'
+          readOnly: true
+        uploaded_by:
+          type: integer
+          readOnly: true
+        verified_by:
+          type: integer
+          readOnly: true
+          nullable: true
+        uploaded_at:
+          type: string
+          format: date-time
+          readOnly: true
+        updated_at:
+          type: string
+          format: date-time
+          readOnly: true
+        verified_at:
+          type: string
+          format: date-time
+          readOnly: true
+          nullable: true
+        rejection_reason:
+          type: string
+          readOnly: true
+        expires_at:
+          type: string
+          format: date
+          nullable: true
+        metadata: {}
+      required:
+      - checksum_sha256
+      - document_file
+      - document_type
+      - employee
+      - id
+      - mime_type
+      - original_filename
+      - rejection_reason
+      - size_bytes
+      - status
+      - title
+      - updated_at
+      - uploaded_at
+      - uploaded_by
+      - verified_at
+      - verified_by
+    HRDocumentStatusEnum:
+      enum:
+      - PENDING_SCAN
+      - PENDING_REVIEW
+      - VERIFIED
+      - QUARANTINED
+      - REJECTED
+      - ARCHIVED
+      type: string
+      description: |-
+        * `PENDING_SCAN` - Pending antivirus scan
+        * `PENDING_REVIEW` - Pending HR review
+        * `VERIFIED` - Verified
+        * `QUARANTINED` - Quarantined
+        * `REJECTED` - Rejected
+        * `ARCHIVED` - Archived
+    LeaveRequest:
+      type: object
+      description: Serialize employee leave requests.
+      properties:
+        id:
+          type: integer
+          readOnly: true
+        employee:
+          type: integer
+        leave_type:
+          $ref: '#/components/schemas/LeaveTypeEnum'
+        start_date:
+          type: string
+          format: date
+        end_date:
+          type: string
+          format: date
+        reason:
+          type: string
+        status:
+          allOf:
+          - $ref: '#/components/schemas/LeaveRequestStatusEnum'
+          readOnly: true
+        reviewed_by:
+          type: integer
+          readOnly: true
+          nullable: true
+        reviewed_at:
+          type: string
+          format: date-time
+          readOnly: true
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+          readOnly: true
+        updated_at:
+          type: string
+          format: date-time
+          readOnly: true
+      required:
+      - created_at
+      - employee
+      - end_date
+      - id
+      - leave_type
+      - reviewed_at
+      - reviewed_by
+      - start_date
+      - status
+      - updated_at
+    LeaveRequestStatusEnum:
+      enum:
+      - PENDING
+      - APPROVED
+      - REJECTED
+      - CANCELLED
+      type: string
+      description: |-
+        * `PENDING` - Pending
+        * `APPROVED` - Approved
+        * `REJECTED` - Rejected
+        * `CANCELLED` - Cancelled
+    LeaveTypeEnum:
+      enum:
+      - VACATION
+      - SICK
+      - PERSONAL
+      - OTHER
+      type: string
+      description: |-
+        * `VACATION` - Vacation
+        * `SICK` - Sick
+        * `PERSONAL` - Personal
+        * `OTHER` - Other
+    LoginResponse:
+      type: object
+      properties:
+        refresh:
+          type: string
+        access:
+          type: string
+      required:
+      - access
+      - refresh
+    LogoutRequest:
+      type: object
+      properties:
+        refresh:
+          type: string
+          description: Refresh token to invalidate.
+      required:
+      - refresh
+    OnboardingJourney:
+      type: object
+      description: Serialize onboarding journeys for authorized API clients.
+      properties:
+        id:
+          type: string
+          format: uuid
+          readOnly: true
+        template_version:
+          type: integer
+          maximum: 2147483647
+          minimum: 0
+        status:
+          allOf:
+          - $ref: '#/components/schemas/OnboardingJourneyStatusEnum'
+          readOnly: true
+        started_at:
+          type: string
+          format: date-time
+          readOnly: true
+          nullable: true
+        target_completion_date:
+          type: string
+          format: date
+          nullable: true
+        completed_at:
+          type: string
+          format: date-time
+          readOnly: true
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+          readOnly: true
+        updated_at:
+          type: string
+          format: date-time
+          readOnly: true
+        employee:
+          type: integer
+          readOnly: true
+        template:
+          type: string
+          format: uuid
+          readOnly: true
+        created_by:
+          type: integer
+          readOnly: true
+      required:
+      - completed_at
+      - created_at
+      - created_by
+      - employee
+      - id
+      - started_at
+      - status
+      - template
+      - template_version
+      - updated_at
+    OnboardingJourneyStatusEnum:
+      enum:
+      - PENDING
+      - IN_PROGRESS
+      - SUSPENDED
+      - COMPLETED
+      - CANCELLED
+      type: string
+      description: |-
+        * `PENDING` - Pending
+        * `IN_PROGRESS` - In progress
+        * `SUSPENDED` - Suspended
+        * `COMPLETED` - Completed
+        * `CANCELLED` - Cancelled
+    OnboardingTask:
+      type: object
+      description: Serialize onboarding tasks without allowing direct status changes.
+      properties:
+        id:
+          type: string
+          format: uuid
+          readOnly: true
+        title:
+          type: string
+          maxLength: 200
+        description:
+          type: string
+        status:
+          allOf:
+          - $ref: '#/components/schemas/Status7daEnum'
+          readOnly: true
+        priority:
+          $ref: '#/components/schemas/PriorityEnum'
+        due_date:
+          type: string
+          format: date
+          nullable: true
+        started_at:
+          type: string
+          format: date-time
+          readOnly: true
+          nullable: true
+        completed_at:
+          type: string
+          format: date-time
+          readOnly: true
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+          readOnly: true
+        updated_at:
+          type: string
+          format: date-time
+          readOnly: true
+        journey:
+          type: string
+          format: uuid
+        activity_template:
+          type: string
+          format: uuid
+        assigned_to:
+          type: integer
+          nullable: true
+      required:
+      - activity_template
+      - completed_at
+      - created_at
+      - id
+      - journey
+      - started_at
+      - status
+      - title
+      - updated_at
+    OnboardingTaskAssignment:
+      type: object
+      description: Validate the assignee identifier for a task assignment.
+      properties:
+        assigned_to_id:
+          type: integer
+          minimum: 1
+      required:
+      - assigned_to_id
+    OnboardingTaskTransition:
+      type: object
+      description: Validate a requested onboarding task status transition.
+      properties:
+        target_status:
+          $ref: '#/components/schemas/TargetStatusEnum'
+      required:
+      - target_status
+    PaginatedBankAccountList:
+      type: object
+      required:
+      - count
+      - results
+      properties:
+        count:
+          type: integer
+          example: 123
+        next:
+          type: string
+          nullable: true
+          format: uri
+          example: http://api.example.org/accounts/?page=4
+        previous:
+          type: string
+          nullable: true
+          format: uri
+          example: http://api.example.org/accounts/?page=2
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/BankAccount'
+    PaginatedDocumentAccessLogList:
+      type: object
+      required:
+      - count
+      - results
+      properties:
+        count:
+          type: integer
+          example: 123
+        next:
+          type: string
+          nullable: true
+          format: uri
+          example: http://api.example.org/accounts/?page=4
+        previous:
+          type: string
+          nullable: true
+          format: uri
+          example: http://api.example.org/accounts/?page=2
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/DocumentAccessLog'
+    PaginatedEmployeeProfileList:
+      type: object
+      required:
+      - count
+      - results
+      properties:
+        count:
+          type: integer
+          example: 123
+        next:
+          type: string
+          nullable: true
+          format: uri
+          example: http://api.example.org/accounts/?page=4
+        previous:
+          type: string
+          nullable: true
+          format: uri
+          example: http://api.example.org/accounts/?page=2
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/EmployeeProfile'
+    PaginatedHRDocumentList:
+      type: object
+      required:
+      - count
+      - results
+      properties:
+        count:
+          type: integer
+          example: 123
+        next:
+          type: string
+          nullable: true
+          format: uri
+          example: http://api.example.org/accounts/?page=4
+        previous:
+          type: string
+          nullable: true
+          format: uri
+          example: http://api.example.org/accounts/?page=2
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/HRDocument'
+    PaginatedLeaveRequestList:
+      type: object
+      required:
+      - count
+      - results
+      properties:
+        count:
+          type: integer
+          example: 123
+        next:
+          type: string
+          nullable: true
+          format: uri
+          example: http://api.example.org/accounts/?page=4
+        previous:
+          type: string
+          nullable: true
+          format: uri
+          example: http://api.example.org/accounts/?page=2
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/LeaveRequest'
+    PaginatedOnboardingJourneyList:
+      type: object
+      required:
+      - count
+      - results
+      properties:
+        count:
+          type: integer
+          example: 123
+        next:
+          type: string
+          nullable: true
+          format: uri
+          example: http://api.example.org/accounts/?page=4
+        previous:
+          type: string
+          nullable: true
+          format: uri
+          example: http://api.example.org/accounts/?page=2
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/OnboardingJourney'
+    PaginatedOnboardingTaskList:
+      type: object
+      required:
+      - count
+      - results
+      properties:
+        count:
+          type: integer
+          example: 123
+        next:
+          type: string
+          nullable: true
+          format: uri
+          example: http://api.example.org/accounts/?page=4
+        previous:
+          type: string
+          nullable: true
+          format: uri
+          example: http://api.example.org/accounts/?page=2
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/OnboardingTask'
+    PaginatedPerformanceReviewList:
+      type: object
+      required:
+      - count
+      - results
+      properties:
+        count:
+          type: integer
+          example: 123
+        next:
+          type: string
+          nullable: true
+          format: uri
+          example: http://api.example.org/accounts/?page=4
+        previous:
+          type: string
+          nullable: true
+          format: uri
+          example: http://api.example.org/accounts/?page=2
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/PerformanceReview'
+    PasswordChange:
+      type: object
+      description: Validate a password change for an authenticated user.
+      properties:
+        old_password:
+          type: string
+          writeOnly: true
+        new_password:
+          type: string
+          writeOnly: true
+        new_password_confirm:
+          type: string
+          writeOnly: true
+      required:
+      - new_password
+      - new_password_confirm
+      - old_password
+    PasswordResetConfirm:
+      type: object
+      description: Validate a password reset using a valid UID and token.
+      properties:
+        uid:
+          type: string
+        token:
+          type: string
+        new_password:
+          type: string
+          writeOnly: true
+        new_password_confirm:
+          type: string
+          writeOnly: true
+      required:
+      - new_password
+      - new_password_confirm
+      - token
+      - uid
+    PasswordResetRequest:
+      type: object
+      description: Validate an email address for a password reset request.
+      properties:
+        email:
+          type: string
+          format: email
+      required:
+      - email
+    PatchedAccountStatus:
+      type: object
+      description: Serializer for activating or deactivating a user account.
+      properties:
+        is_active:
+          type: boolean
+    PatchedBankAccount:
+      type: object
+      description: Serialize employee bank account data securely.
+      properties:
+        id:
+          type: integer
+          readOnly: true
+        employee:
+          type: integer
+        account_type:
+          $ref: '#/components/schemas/AccountTypeEnum'
+        routing_number:
+          type: string
+          writeOnly: true
+        account_number:
+          type: string
+          writeOnly: true
+        masked_routing_number:
+          type: string
+          description: Return only the last four digits of the routing number.
+          readOnly: true
+        masked_account_number:
+          type: string
+          description: Return only the last four digits of the account number.
+          readOnly: true
+        last_four:
+          type: string
+          readOnly: true
+        is_primary:
+          type: boolean
+        is_verified:
+          type: boolean
+          readOnly: true
+        created_at:
+          type: string
+          format: date-time
+          readOnly: true
+        updated_at:
+          type: string
+          format: date-time
+          readOnly: true
+    PatchedEmployeeProfile:
+      type: object
+      description: Serialize employee HR profile data.
+      properties:
+        id:
+          type: integer
+          readOnly: true
+        user:
+          type: integer
+        employee_id:
+          type: string
+          maxLength: 50
+        department:
+          type: integer
+        position:
+          type: integer
+        phone:
+          type: string
+          maxLength: 30
+        hire_date:
+          type: string
+          format: date
+        date_of_birth:
+          type: string
+          format: date
+          nullable: true
+        address:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+          readOnly: true
+        updated_at:
+          type: string
+          format: date-time
+          readOnly: true
+    PatchedHRDocument:
+      type: object
+      description: Serialize HR document metadata without exposing storage details.
+      properties:
+        id:
+          type: string
+          format: uuid
+          readOnly: true
+        employee:
+          type: integer
+          readOnly: true
+        title:
+          type: string
+          maxLength: 200
+        document_file:
+          type: string
+          format: uri
+          writeOnly: true
+        document_type:
+          $ref: '#/components/schemas/DocumentTypeEnum'
+        original_filename:
+          type: string
+          readOnly: true
+        mime_type:
+          type: string
+          readOnly: true
+        size_bytes:
+          type: integer
+          readOnly: true
+        checksum_sha256:
+          type: string
+          readOnly: true
+        status:
+          allOf:
+          - $ref: '#/components/schemas/HRDocumentStatusEnum'
+          readOnly: true
+        uploaded_by:
+          type: integer
+          readOnly: true
+        verified_by:
+          type: integer
+          readOnly: true
+          nullable: true
+        uploaded_at:
+          type: string
+          format: date-time
+          readOnly: true
+        updated_at:
+          type: string
+          format: date-time
+          readOnly: true
+        verified_at:
+          type: string
+          format: date-time
+          readOnly: true
+          nullable: true
+        rejection_reason:
+          type: string
+          readOnly: true
+        expires_at:
+          type: string
+          format: date
+          nullable: true
+        metadata: {}
+    PatchedLeaveRequest:
+      type: object
+      description: Serialize employee leave requests.
+      properties:
+        id:
+          type: integer
+          readOnly: true
+        employee:
+          type: integer
+        leave_type:
+          $ref: '#/components/schemas/LeaveTypeEnum'
+        start_date:
+          type: string
+          format: date
+        end_date:
+          type: string
+          format: date
+        reason:
+          type: string
+        status:
+          allOf:
+          - $ref: '#/components/schemas/LeaveRequestStatusEnum'
+          readOnly: true
+        reviewed_by:
+          type: integer
+          readOnly: true
+          nullable: true
+        reviewed_at:
+          type: string
+          format: date-time
+          readOnly: true
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+          readOnly: true
+        updated_at:
+          type: string
+          format: date-time
+          readOnly: true
+    PatchedPerformanceReview:
+      type: object
+      description: Serialize employee performance review data.
+      properties:
+        id:
+          type: integer
+          readOnly: true
+        employee:
+          type: integer
+        reviewer:
+          type: integer
+          readOnly: true
+        review_period_start:
+          type: string
+          format: date
+        review_period_end:
+          type: string
+          format: date
+        score:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,1}(?:\.\d{0,2})?$
+        comments:
+          type: string
+        status:
+          allOf:
+          - $ref: '#/components/schemas/PerformanceReviewStatusEnum'
+          readOnly: true
+        submitted_at:
+          type: string
+          format: date-time
+          readOnly: true
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+          readOnly: true
+        updated_at:
+          type: string
+          format: date-time
+          readOnly: true
+    PatchedUserPrivilege:
+      type: object
+      description: Serializer for managing administrative privileges.
+      properties:
+        is_staff:
+          type: boolean
+        is_superuser:
+          type: boolean
+    PerformanceReview:
+      type: object
+      description: Serialize employee performance review data.
+      properties:
+        id:
+          type: integer
+          readOnly: true
+        employee:
+          type: integer
+        reviewer:
+          type: integer
+          readOnly: true
+        review_period_start:
+          type: string
+          format: date
+        review_period_end:
+          type: string
+          format: date
+        score:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,1}(?:\.\d{0,2})?$
+        comments:
+          type: string
+        status:
+          allOf:
+          - $ref: '#/components/schemas/PerformanceReviewStatusEnum'
+          readOnly: true
+        submitted_at:
+          type: string
+          format: date-time
+          readOnly: true
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+          readOnly: true
+        updated_at:
+          type: string
+          format: date-time
+          readOnly: true
+      required:
+      - created_at
+      - employee
+      - id
+      - review_period_end
+      - review_period_start
+      - reviewer
+      - score
+      - status
+      - submitted_at
+      - updated_at
+    PerformanceReviewStatusEnum:
+      enum:
+      - DRAFT
+      - SUBMITTED
+      - ACKNOWLEDGED
+      type: string
+      description: |-
+        * `DRAFT` - Draft
+        * `SUBMITTED` - Submitted
+        * `ACKNOWLEDGED` - Acknowledged
+    PriorityEnum:
+      enum:
+      - LOW
+      - MEDIUM
+      - HIGH
+      - URGENT
+      type: string
+      description: |-
+        * `LOW` - Low
+        * `MEDIUM` - Medium
+        * `HIGH` - High
+        * `URGENT` - Urgent
+    Status7daEnum:
+      enum:
+      - PENDING
+      - IN_PROGRESS
+      - BLOCKED
+      - COMPLETED
+      - CANCELLED
+      type: string
+      description: |-
+        * `PENDING` - Pending
+        * `IN_PROGRESS` - In progress
+        * `BLOCKED` - Blocked
+        * `COMPLETED` - Completed
+        * `CANCELLED` - Cancelled
+    TargetStatusEnum:
+      enum:
+      - PENDING
+      - IN_PROGRESS
+      - BLOCKED
+      - COMPLETED
+      - CANCELLED
+      type: string
+      description: |-
+        * `PENDING` - Pending
+        * `IN_PROGRESS` - In progress
+        * `BLOCKED` - Blocked
+        * `COMPLETED` - Completed
+        * `CANCELLED` - Cancelled
+    TokenRefresh:
+      type: object
+      properties:
+        access:
+          type: string
+          readOnly: true
+        refresh:
+          type: string
+      required:
+      - access
+      - refresh
+    UserAccount:
+      type: object
+      description: Serializer for displaying a user's HR account information.
+      properties:
+        id:
+          type: integer
+          readOnly: true
+        email:
+          type: string
+          format: email
+          readOnly: true
+        name:
+          type: string
+          maxLength: 255
+        email_verified:
+          type: boolean
+          readOnly: true
+        is_active:
+          type: boolean
+          readOnly: true
+      required:
+      - email
+      - email_verified
+      - id
+      - is_active
+      - name
+    UserRegistration:
+      type: object
+      description: Serializer for creating a new HR platform user account.
+      properties:
+        id:
+          type: integer
+          readOnly: true
+        email:
+          type: string
+          format: email
+          maxLength: 255
+        name:
+          type: string
+          maxLength: 255
+        password:
+          type: string
+          writeOnly: true
+          maxLength: 128
+        password_confirm:
+          type: string
+          writeOnly: true
+      required:
+      - email
+      - id
+      - name
+      - password
+      - password_confirm
+  securitySchemes:
+    jwtAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT

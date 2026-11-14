@@ -1233,6 +1233,21 @@ class DocumentVersion(models.Model):
         verbose_name = "Document version"
         verbose_name_plural = "Document versions"
 
+    def save(self, *args, **kwargs):
+        """Prevent modifications to an existing document version."""
+        if self.pk and type(self).objects.filter(pk=self.pk).exists():
+            raise ValidationError(
+                "Document versions cannot be modified."
+            )
+
+        return super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        """Prevent deletion of an existing document version."""
+        raise ValidationError(
+            "Document versions cannot be deleted."
+        )
+
     def __str__(self):
         return f"{self.document.title} - v{self.version_number}"
 

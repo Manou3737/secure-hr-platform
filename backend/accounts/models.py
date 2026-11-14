@@ -135,6 +135,24 @@ class AuditLog(models.Model):
         ("HR_DOCUMENT_VERIFIED", "HR Document Verified"),
         ("HR_DOCUMENT_REJECTED", "HR Document Rejected"),
         ("HR_DOCUMENT_ARCHIVED", "HR Document Archived"),
+         # Recruitment - Job Postings
+        ("JOB_POSTING_CREATED", "Job Posting Created"),
+        ("JOB_POSTING_UPDATED", "Job Posting Updated"),
+        ("JOB_POSTING_PUBLISHED", "Job Posting Published"),
+        ("JOB_POSTING_CLOSED", "Job Posting Closed"),
+        ("JOB_POSTING_CANCELLED", "Job Posting Cancelled"),
+
+        # Recruitment - Candidates
+        ("CANDIDATE_CREATED", "Candidate Created"),
+        ("CANDIDATE_UPDATED", "Candidate Updated"),
+                # Recruitment - Job Applications
+        ("JOB_APPLICATION_SUBMITTED", "Job Application Submitted"),
+        ("JOB_APPLICATION_ASSIGNED", "Job Application Assigned"),
+        (
+            "JOB_APPLICATION_STATUS_CHANGED",
+            "Job Application Status Changed",
+        ),
+
     )
 
     user = models.ForeignKey(

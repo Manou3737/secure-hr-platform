@@ -19,7 +19,9 @@ from employees.services.dashboard.security_metrics import (
 from employees.services.dashboard.workforce_metrics import (
     WorkforceMetricsService,
 )
-
+from employees.services.dashboard.recruitment_metrics import (
+    RecruitmentMetricsService,
+)
 
 class DashboardService:
     """
@@ -71,5 +73,10 @@ class DashboardService:
             "risk": RiskMetricsService.get_dashboard(
                 department_id=department_id,
                 as_of=as_of,
+            ),
+            "recruitment": RecruitmentMetricsService.get_dashboard(
+                department_id=department_id,
+                as_of=as_of,
+                days=days,
             ),
         }

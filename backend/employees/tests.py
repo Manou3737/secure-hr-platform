@@ -1,19 +1,23 @@
 from django.test import TestCase
 from datetime import date, datetime, timedelta
 from unittest.mock import patch
-
+from cryptography.fernet import Fernet
+from employees.encryption import encrypt_bank_data, decrypt_bank_data
 from accounts.models import User, SecurityEvent, AuditLog
 
 from rest_framework import status
 from rest_framework.test import APIClient
+from copy import deepcopy
 
+from django.core.cache import cache
 from django.db.models.deletion import ProtectedError
 from django.db import IntegrityError
 from django.db import connection
 from django.db import transaction
-
+from django.core.management import call_command, CommandError
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.core.exceptions import ValidationError, PermissionDenied
+
 from employees.storage import hr_document_storage
 from django.utils import timezone
 from django.conf import settings
@@ -1502,6 +1506,38 @@ class LeaveRequestRBACAPITests(TestCase):
             department=self.department,
         )
 
+        self.manager_profile = EmployeeProfile.objects.create(
+            user=self.hr_manager,
+            employee_id="EMP-003",
+            department=self.department,
+            position=self.position,
+            hire_date=date(2026, 1, 10),
+        )
+
+        self.finance_department = Department.objects.create(
+            name="Finance",
+            code="FIN",
+        )
+
+        self.finance_position = Position.objects.create(
+            title="Financial Analyst",
+            department=self.finance_department,
+        )
+
+        self.finance_employee = User.objects.create_user(
+            email="finance@example.com",
+            name="Finance Employee",
+            password="StrongPassword123!",
+            role="EMPLOYEE",
+        )
+
+        self.finance_employee_profile = EmployeeProfile.objects.create(
+            user=self.finance_employee,
+            employee_id="EMP-004",
+            department=self.finance_department,
+            position=self.finance_position,
+            hire_date=date(2026, 3, 1),
+        )
         self.employee_profile = EmployeeProfile.objects.create(
             user=self.employee,
             employee_id="EMP-001",
@@ -1538,6 +1574,13 @@ class LeaveRequestRBACAPITests(TestCase):
             )
         )
 
+        self.finance_leave_request = LeaveRequest.objects.create(
+            employee=self.finance_employee_profile,
+            leave_type="PERSONAL",
+            start_date=date(2026, 11, 15),
+            end_date=date(2026, 11, 17),
+            reason="Finance department leave.",
+        )
         self.url = "/api/v1/employees/leave-requests/"
 
     def authenticate(self, user):
@@ -1689,7 +1732,7 @@ class LeaveRequestRBACAPITests(TestCase):
             status.HTTP_404_NOT_FOUND,
         )
 
-    def test_hr_manager_can_list_all_leave_requests(self):
+    def test_hr_manager_can_list_department_leave_requests(self):
         """HR managers can view all leave requests."""
 
         self.authenticate(self.hr_manager)
@@ -1705,6 +1748,43 @@ class LeaveRequestRBACAPITests(TestCase):
             len(response.data["results"]),
             2,
         )
+
+
+    def test_hr_manager_cannot_retrieve_other_department_request(self):
+        """HR managers cannot retrieve requests from another department."""
+
+        self.authenticate(self.hr_manager)
+
+        response = self.client.get(
+            f"{self.url}{self.finance_leave_request.id}/"
+        )
+
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_404_NOT_FOUND,
+        )
+
+    def test_hr_manager_cannot_approve_other_department_request(self):
+        """HR managers cannot approve requests from another department."""
+
+        self.authenticate(self.hr_manager)
+
+        response = self.client.post(
+            f"{self.url}{self.finance_leave_request.id}/approve/",
+        )
+
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_404_NOT_FOUND,
+        )
+
+        self.finance_leave_request.refresh_from_db()
+
+        self.assertEqual(
+            self.finance_leave_request.status,
+            "PENDING",
+        )
+
 
     def test_hr_manager_can_approve_leave_request(self):
         """HR managers can approve pending requests."""
@@ -1778,6 +1858,34 @@ class LeaveRequestRBACAPITests(TestCase):
             self.leave_request.status,
             "APPROVED",
         )
+
+
+    def test_hr_admin_can_list_all_department_leave_requests(self):
+        """HR admins can view requests across all departments."""
+
+        self.authenticate(self.hr_admin)
+
+        response = self.client.get(self.url)
+
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_200_OK,
+        )
+
+        returned_ids = {
+            leave["id"]
+            for leave in response.data["results"]
+        }
+
+        self.assertEqual(
+            returned_ids,
+            {
+                self.leave_request.id,
+                self.other_leave_request.id,
+                self.finance_leave_request.id,
+            },
+        )
+
 
     def test_super_admin_can_approve_leave_request(self):
         """Super admins can approve pending requests."""
@@ -2221,6 +2329,53 @@ class LeaveRequestRBACAPITests(TestCase):
         self.assertEqual(
             response.data["results"][0]["id"],
             self.leave_request.id,
+        )
+
+    def test_hr_manager_without_profile_is_forbidden(self):
+        """HR managers without an employee profile are denied."""
+
+        manager_without_profile = User.objects.create_user(
+            email="manager.noprofile@example.com",
+            name="Manager Without Profile",
+            password="StrongPassword123!",
+            role="HR_MANAGER",
+        )
+
+        self.authenticate(manager_without_profile)
+
+        response = self.client.get(self.url)
+
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_403_FORBIDDEN,
+        )
+
+    def test_employee_without_profile_gets_forbidden_on_create(self):
+        """Employees without a profile cannot submit leave requests."""
+
+        employee_without_profile = User.objects.create_user(
+            email="employee.noprofile@example.com",
+            name="Employee Without Profile",
+            password="StrongPassword123!",
+            role="EMPLOYEE",
+        )
+
+        self.authenticate(employee_without_profile)
+
+        response = self.client.post(
+            self.url,
+            {
+                "leave_type": "VACATION",
+                "start_date": "2026-12-10",
+                "end_date": "2026-12-12",
+                "reason": "Personal vacation.",
+            },
+            format="json",
+        )
+
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_403_FORBIDDEN,
         )
 
 class PayPeriodModelTests(TestCase):
@@ -3194,6 +3349,111 @@ class BankAccountModelTests(TestCase):
             "9876543210",
         )
 
+    def test_encryption_fails_when_key_is_missing(self):
+        """Encryption must fail when the environment key is missing."""
+
+        with patch.dict(
+            "os.environ",
+            {"BANK_ENCRYPTION_KEY": ""},
+        ):
+            with self.assertRaises(RuntimeError):
+                encrypt_bank_data("123456789")
+
+    def test_decryption_fails_with_wrong_key(self):
+        """Decryption must reject data encrypted with another key."""
+
+        original_key = Fernet.generate_key()
+        wrong_key = Fernet.generate_key()
+
+        encrypted_value = Fernet(original_key).encrypt(
+            b"123456789",
+        ).decode()
+
+        with patch.dict(
+            "os.environ",
+            {"BANK_ENCRYPTION_KEY": wrong_key.decode()},
+        ):
+            with self.assertRaises(ValueError):
+                decrypt_bank_data(encrypted_value)
+
+    def test_decryption_fails_with_tampered_data(self):
+        """Decryption must reject modified encrypted data."""
+
+        key = Fernet.generate_key()
+
+        with patch.dict(
+            "os.environ",
+            {"BANK_ENCRYPTION_KEY": key.decode()},
+        ):
+            encrypted_value = encrypt_bank_data("123456789")
+
+            tampered_value = (
+                ("A" if encrypted_value[0] != "A" else "B")
+                + encrypted_value[1:]
+            )
+
+            with self.assertRaises(ValueError):
+                decrypt_bank_data(tampered_value)
+
+    def test_decryption_works_with_previous_key(self):
+        """Existing data must remain decryptable with a previous key."""
+
+        old_key = Fernet.generate_key()
+        new_key = Fernet.generate_key()
+
+        encrypted_value = Fernet(old_key).encrypt(
+            b"123456789",
+        ).decode()
+
+        with patch.dict(
+            "os.environ",
+            {
+                "BANK_ENCRYPTION_KEY": new_key.decode(),
+                "BANK_ENCRYPTION_OLD_KEYS": old_key.decode(),
+            },
+        ):
+            self.assertEqual(
+                decrypt_bank_data(encrypted_value),
+                "123456789",
+            )
+
+    def test_encryption_uses_primary_key(self):
+        """New bank data must be encrypted with the primary key."""
+
+        primary_key = Fernet.generate_key()
+        old_key = Fernet.generate_key()
+
+        with patch.dict(
+            "os.environ",
+            {
+                "BANK_ENCRYPTION_KEY": primary_key.decode(),
+                "BANK_ENCRYPTION_OLD_KEYS": old_key.decode(),
+            },
+        ):
+            encrypted_value = encrypt_bank_data("123456789")
+
+            self.assertEqual(
+                Fernet(primary_key).decrypt(
+                    encrypted_value.encode(),
+                ).decode(),
+                "123456789",
+            )
+
+    def test_invalid_previous_key_raises_configuration_error(self):
+        """Invalid previous keys must be rejected."""
+
+        primary_key = Fernet.generate_key()
+
+        with patch.dict(
+            "os.environ",
+            {
+                "BANK_ENCRYPTION_KEY": primary_key.decode(),
+                "BANK_ENCRYPTION_OLD_KEYS": "invalid-fernet-key",
+            },
+        ):
+            with self.assertRaises(RuntimeError):
+                encrypt_bank_data("123456789")
+
     def test_last_four_is_generated_automatically(self):
         account = BankAccount.objects.create(
             employee=self.employee,
@@ -3890,7 +4150,15 @@ class BankAccountViewSetTests(TestCase):
             title="Software Engineer",
             department=self.department,
         )
+        self.finance_department = Department.objects.create(
+            name="Finance",
+            code="FIN",
+        )
 
+        self.finance_position = Position.objects.create(
+            title="Financial Analyst",
+            department=self.finance_department,
+        )
         self.employee = EmployeeProfile.objects.create(
             user=self.employee_user,
             employee_id="EMP-001",
@@ -3906,12 +4174,39 @@ class BankAccountViewSetTests(TestCase):
             position=self.position,
             hire_date=date(2026, 1, 1),
         )
-
+        self.manager_profile = EmployeeProfile.objects.create(
+            user=self.hr_manager,
+            employee_id="EMP-003",
+            department=self.department,
+            position=self.position,
+            hire_date=date(2026, 1, 1),
+        )
         self.bank_account = BankAccount.objects.create(
             employee=self.other_employee,
             account_type="CHECKING",
             routing_number="021000021",
             account_number="123456789123",
+        )
+        self.finance_employee_user = User.objects.create_user(
+            email="finance.employee@example.com",
+            name="Finance Employee",
+            password="TestPass123!",
+            role="EMPLOYEE",
+        )
+
+        self.finance_employee = EmployeeProfile.objects.create(
+            user=self.finance_employee_user,
+            employee_id="EMP-004",
+            department=self.finance_department,
+            position=self.finance_position,
+            hire_date=date(2026, 1, 1),
+        )
+
+        self.finance_bank_account = BankAccount.objects.create(
+            employee=self.finance_employee,
+            account_type="CHECKING",
+            routing_number="021000021",
+            account_number="987654321987",
         )
 
     def authenticate(self, user):
@@ -3969,6 +4264,38 @@ class BankAccountViewSetTests(TestCase):
             "****1123",
         )
 
+    def test_employee_cannot_reassign_own_bank_account(self):
+        """Employees cannot transfer their bank account to another employee."""
+
+        own_account = BankAccount.objects.create(
+            employee=self.employee,
+            account_type="CHECKING",
+            routing_number="021000021",
+            account_number="555555555555",
+        )
+
+        self.authenticate(self.employee_user)
+
+        response = self.client.patch(
+            f"/api/v1/employees/bank-accounts/{own_account.id}/",
+            {
+                "employee": self.other_employee.id,
+            },
+            format="json",
+        )
+
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_400_BAD_REQUEST,
+        )
+
+        own_account.refresh_from_db()
+
+        self.assertEqual(
+            own_account.employee,
+            self.employee,
+        )
+
     def test_employee_cannot_access_other_employee_account(self):
         self.authenticate(self.employee_user)
 
@@ -4022,6 +4349,46 @@ class BankAccountViewSetTests(TestCase):
             "****9123",
         )
 
+    def test_hr_manager_cannot_list_other_department_bank_accounts(self):
+        self.authenticate(self.hr_manager)
+
+        response = self.client.get(
+            "/api/v1/employees/bank-accounts/",
+        )
+
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_200_OK,
+        )
+
+        returned_ids = {
+            account["id"]
+            for account in response.data["results"]
+        }
+
+        self.assertIn(
+            self.bank_account.id,
+            returned_ids,
+        )
+
+        self.assertNotIn(
+            self.finance_bank_account.id,
+            returned_ids,
+        )
+
+    def test_hr_manager_cannot_view_other_department_bank_account(self):
+        self.authenticate(self.hr_manager)
+
+        response = self.client.get(
+            f"/api/v1/employees/bank-accounts/"
+            f"{self.finance_bank_account.id}/",
+        )
+
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_404_NOT_FOUND,
+        )
+
     def test_hr_manager_cannot_create_bank_account(self):
         self.authenticate(self.hr_manager)
 
@@ -4040,6 +4407,92 @@ class BankAccountViewSetTests(TestCase):
             response.status_code,
             status.HTTP_403_FORBIDDEN,
         )
+
+    def test_hr_manager_without_profile_cannot_list_bank_accounts(self):
+        manager_without_profile = User.objects.create_user(
+            email="manager-no-profile@example.com",
+            name="Manager Without Profile",
+            password="TestPass123!",
+            role="HR_MANAGER",
+        )
+
+        self.authenticate(manager_without_profile)
+
+        response = self.client.get(
+            "/api/v1/employees/bank-accounts/",
+        )
+
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_403_FORBIDDEN,
+        )
+
+    def test_hr_admin_can_view_other_department_bank_account(self):
+        self.authenticate(self.hr_admin)
+
+        response = self.client.get(
+            f"/api/v1/employees/bank-accounts/"
+            f"{self.finance_bank_account.id}/",
+        )
+
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_200_OK,
+        )
+
+
+    def test_super_admin_can_view_other_department_bank_account(self):
+        self.authenticate(self.super_admin)
+
+        response = self.client.get(
+            f"/api/v1/employees/bank-accounts/"
+            f"{self.finance_bank_account.id}/",
+        )
+
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_200_OK,
+        )
+
+    def test_hr_admin_can_list_bank_accounts_across_departments(self):
+        self.authenticate(self.hr_admin)
+
+        response = self.client.get(
+            "/api/v1/employees/bank-accounts/",
+        )
+
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_200_OK,
+        )
+
+        returned_ids = {
+            account["id"]
+            for account in response.data["results"]
+        }
+
+        self.assertIn(self.bank_account.id, returned_ids)
+        self.assertIn(self.finance_bank_account.id, returned_ids)
+
+    def test_super_admin_can_list_bank_accounts_across_departments(self):
+        self.authenticate(self.super_admin)
+
+        response = self.client.get(
+            "/api/v1/employees/bank-accounts/",
+        )
+
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_200_OK,
+        )
+
+        returned_ids = {
+            account["id"]
+            for account in response.data["results"]
+        }
+
+        self.assertIn(self.bank_account.id, returned_ids)
+        self.assertIn(self.finance_bank_account.id, returned_ids)
 
     def test_hr_admin_can_create_bank_account(self):
         self.authenticate(self.hr_admin)
@@ -5821,6 +6274,45 @@ class DocumentVersionServiceTests(TestCase):
 
         mock_scan.assert_not_called()
 
+
+    @patch("employees.services.document_version.scan_uploaded_file")
+    @patch(
+        "employees.services.document_version."
+        "DocumentVersionService._validate_file"
+    )
+    def test_hr_manager_cannot_version_document(
+        self,
+        mock_validate_file,
+        mock_scan,
+    ):
+        from employees.services.document_version import (
+            DocumentVersionService,
+        )
+
+        manager = User.objects.create_user(
+            email="version-manager@example.com",
+            name="Version HR Manager",
+            password="StrongPassword123!",
+            role="HR_MANAGER",
+        )
+
+        with self.assertRaises(PermissionDenied):
+            DocumentVersionService.create_version(
+                document_id=self.document.pk,
+                uploaded_file=self.make_pdf(),
+                actor=manager,
+            )
+
+        mock_validate_file.assert_not_called()
+        mock_scan.assert_not_called()
+
+        self.assertFalse(
+            DocumentVersion.objects.filter(
+                document=self.document,
+            ).exists()
+        )
+
+
     @patch("employees.services.document_version.scan_uploaded_file")
     def test_archived_document_cannot_be_versioned(self, mock_scan):
         from employees.services.document_version import DocumentVersionService
@@ -6453,6 +6945,36 @@ class HRDocumentRBACAPITests(TestCase):
             hire_date=date(2026, 2, 1),
         )
 
+        self.manager_profile = EmployeeProfile.objects.create(
+            user=self.hr_manager,
+            employee_id="HRDOC-MGR-001",
+            department=self.department,
+            position=self.position,
+            hire_date=date(2026, 1, 10),
+        )
+
+        self.foreign_department = Department.objects.create(
+            name="HR Document Foreign Department",
+            code="HRDF",
+        )
+        self.foreign_position = Position.objects.create(
+            title="Foreign Department Employee",
+            department=self.foreign_department,
+        )
+
+        self.foreign_employee = User.objects.create_user(
+            email="hrdoc-foreign@example.com",
+            name="HR Document Foreign Employee",
+            password="StrongPassword123!",
+            role="EMPLOYEE",
+        )
+        self.foreign_profile = EmployeeProfile.objects.create(
+            user=self.foreign_employee,
+            employee_id="HRDOC-003",
+            department=self.foreign_department,
+            position=self.foreign_position,
+            hire_date=date(2026, 3, 1),
+        )
         self.document = HRDocument.objects.create(
             employee=self.profile,
             title="Employment Contract",
@@ -6464,6 +6986,16 @@ class HRDocumentRBACAPITests(TestCase):
             uploaded_by=self.hr_admin,
         )
 
+        self.foreign_document = HRDocument.objects.create(
+            employee=self.foreign_profile,
+            title="Foreign Department Contract",
+            document_type=HRDocument.DocumentType.EMPLOYMENT_CONTRACT,
+            original_filename="foreign-contract.pdf",
+            storage_key="hr-documents/rbac/foreign-contract.pdf",
+            mime_type="application/pdf",
+            size_bytes=3072,
+            uploaded_by=self.hr_admin,
+        )
         self.other_document = HRDocument.objects.create(
             employee=self.other_profile,
             title="Other Employee Contract",
@@ -6512,7 +7044,6 @@ class HRDocumentRBACAPITests(TestCase):
             status.HTTP_404_NOT_FOUND,
         )
 
-
     def test_employee_can_retrieve_own_document(self):
         self.authenticate(self.employee)
 
@@ -6535,7 +7066,6 @@ class HRDocumentRBACAPITests(TestCase):
             audit_entry.details,
             "HR document metadata viewed.",
         )
-
 
     def test_hr_manager_can_view_document_review_history(self):
         self.authenticate(self.hr_manager)
@@ -6575,7 +7105,7 @@ class HRDocumentRBACAPITests(TestCase):
         response = self.client.get(self.url)
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(response.data["count"], 2)
+        self.assertEqual(response.data["count"], 3)
 
     def test_hr_manager_can_list_documents(self):
         self.authenticate(self.hr_manager)
@@ -6591,7 +7121,7 @@ class HRDocumentRBACAPITests(TestCase):
         response = self.client.get(self.url)
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(response.data["count"], 2)
+        self.assertEqual(response.data["count"], 3)
 
     def test_employee_cannot_delete_document(self):
         self.authenticate(self.employee)
@@ -6670,6 +7200,98 @@ class HRDocumentRBACAPITests(TestCase):
         document = HRDocument.objects.get(pk=response.data["id"])
         self.assertEqual(document.employee, self.profile)
         self.assertNotEqual(document.employee, self.other_profile)
+
+    def test_hr_manager_list_excludes_foreign_department_documents(self):
+        self.client.force_authenticate(user=self.hr_manager)
+
+        response = self.client.get(self.url)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["count"], 2)
+
+        document_ids = {
+            item["id"] for item in response.data["results"]
+        }
+        self.assertNotIn(self.foreign_document.pk, document_ids)
+
+    def test_hr_manager_cannot_retrieve_foreign_department_document(self):
+        self.client.force_authenticate(user=self.hr_manager)
+
+        response = self.client.get(
+            f"{self.url}{self.foreign_document.pk}/"
+        )
+
+        self.assertEqual(response.status_code, 404)
+
+    def test_hr_manager_cannot_verify_foreign_department_document(self):
+        self.foreign_document.status = "PENDING_REVIEW"
+        self.foreign_document.save(update_fields=["status"])
+
+        self.client.force_authenticate(user=self.hr_manager)
+
+        response = self.client.post(
+            f"{self.url}{self.foreign_document.pk}/verify/"
+        )
+
+        self.assertEqual(response.status_code, 404)
+
+        self.foreign_document.refresh_from_db()
+        self.assertEqual(
+            self.foreign_document.status,
+            "PENDING_REVIEW",
+        )
+        self.assertFalse(
+            DocumentReview.objects.filter(
+                document=self.foreign_document,
+            ).exists()
+        )
+
+    def test_hr_manager_cannot_reject_foreign_department_document(self):
+        self.foreign_document.status = "PENDING_REVIEW"
+        self.foreign_document.save(update_fields=["status"])
+
+        self.client.force_authenticate(user=self.hr_manager)
+
+        response = self.client.post(
+            f"{self.url}{self.foreign_document.pk}/reject/",
+            {"reason": "Unauthorized rejection."},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 404)
+
+        self.foreign_document.refresh_from_db()
+        self.assertEqual(
+            self.foreign_document.status,
+            "PENDING_REVIEW",
+        )
+        self.assertEqual(
+            self.foreign_document.rejection_reason,
+            "",
+        )
+        self.assertFalse(
+            DocumentReview.objects.filter(
+                document=self.foreign_document,
+            ).exists()
+        )
+
+    def test_hr_manager_cannot_archive_foreign_department_document(self):
+        self.foreign_document.status = "VERIFIED"
+        self.foreign_document.save(update_fields=["status"])
+
+        self.client.force_authenticate(user=self.hr_manager)
+
+        response = self.client.post(
+            f"{self.url}{self.foreign_document.pk}/archive/"
+        )
+
+        self.assertEqual(response.status_code, 404)
+
+        self.foreign_document.refresh_from_db()
+        self.assertEqual(
+            self.foreign_document.status,
+            "VERIFIED",
+        )
 
     def test_hr_manager_can_verify_document_pending_review(self):
         self.document.status = "PENDING_REVIEW"
@@ -7135,6 +7757,95 @@ class HRDocumentRBACAPITests(TestCase):
             HRDocument.objects.filter(pk=self.document.pk).exists()
         )
 
+
+    def test_hr_manager_without_profile_cannot_list_documents(self):
+        self.manager_profile.delete()
+        self.hr_manager.refresh_from_db()
+
+        self.client.force_authenticate(user=self.hr_manager)
+
+        response = self.client.get(self.url)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["count"], 0)
+
+    def test_hr_manager_without_profile_cannot_retrieve_document(self):
+        self.manager_profile.delete()
+        self.hr_manager.refresh_from_db()
+
+        self.client.force_authenticate(user=self.hr_manager)
+
+        response = self.client.get(
+            f"{self.url}{self.document.pk}/"
+        )
+
+        self.assertEqual(response.status_code, 404)
+
+    def test_hr_admin_can_retrieve_foreign_department_document(self):
+        self.client.force_authenticate(user=self.hr_admin)
+
+        response = self.client.get(
+            f"{self.url}{self.foreign_document.pk}/"
+        )
+
+        self.assertEqual(response.status_code, 200)
+
+    def test_super_admin_can_retrieve_foreign_department_document(self):
+        self.client.force_authenticate(user=self.super_admin)
+
+        response = self.client.get(
+            f"{self.url}{self.foreign_document.pk}/"
+        )
+
+        self.assertEqual(response.status_code, 200)
+
+    def test_hr_manager_cannot_download_document(self):
+        self.document.status = HRDocument.Status.VERIFIED
+        self.document.save(update_fields=["status"])
+
+        self.client.force_authenticate(user=self.hr_manager)
+
+        response = self.client.get(
+            f"{self.url}{self.document.pk}/download/"
+        )
+
+        self.assertEqual(response.status_code, 403)
+
+    def test_hr_manager_cannot_create_document_version(self):
+        self.client.force_authenticate(user=self.hr_manager)
+
+        response = self.client.post(
+            f"{self.url}{self.document.pk}/create-version/",
+            {
+                "file": SimpleUploadedFile(
+                    "contract-v2.pdf",
+                    b"%PDF-1.7 test content",
+                    content_type="application/pdf",
+                )
+            },
+            format="multipart",
+        )
+
+        self.assertEqual(response.status_code, 403)
+
+        self.assertFalse(
+            DocumentVersion.objects.filter(
+                document=self.document,
+            ).exists()
+        )
+
+    def test_hr_manager_cannot_view_foreign_department_review_history(self):
+        self.foreign_document.status = "PENDING_REVIEW"
+        self.foreign_document.save(update_fields=["status"])
+
+        self.client.force_authenticate(user=self.hr_manager)
+
+        response = self.client.get(
+            f"{self.url}{self.foreign_document.pk}/reviews/"
+        )
+
+        self.assertEqual(response.status_code, 404)
+
 class DocumentAccessServiceTests(TestCase):
     """Unit tests for HR document access rules."""
 
@@ -7176,30 +7887,61 @@ class DocumentAccessServiceTests(TestCase):
             role="EMPLOYEE",
         )
 
-        department = Department.objects.create(
+        self.department = Department.objects.create(
             name="Access Test Department",
             code="ATD",
         )
         position = Position.objects.create(
             title="Access Test Position",
-            department=department,
+            department=self.department,
         )
 
         self.profile = EmployeeProfile.objects.create(
             user=self.employee,
             employee_id="ACCESS-001",
-            department=department,
+            department=self.department,
             position=position,
             hire_date=date(2026, 1, 15),
         )
         self.other_profile = EmployeeProfile.objects.create(
             user=self.other_employee,
             employee_id="ACCESS-002",
-            department=department,
+            department=self.department,
             position=position,
             hire_date=date(2026, 2, 1),
         )
+        self.manager_profile = EmployeeProfile.objects.create(
+            user=self.hr_manager,
+            employee_id="ACCESS-MANAGER",
+            department=self.department,
+            position=position,
+            hire_date=date(2026, 1, 10),
+        )
 
+        self.other_department = Department.objects.create(
+            name="Other Access Department",
+            code="OAD",
+        )
+
+        self.other_position = Position.objects.create(
+            title="Other Access Position",
+            department=self.other_department,
+        )
+
+        self.foreign_employee = User.objects.create_user(
+            email="access-foreign@example.com",
+            name="Foreign Department Employee",
+            password="StrongPassword123!",
+            role="EMPLOYEE",
+        )
+
+        self.foreign_profile = EmployeeProfile.objects.create(
+            user=self.foreign_employee,
+            employee_id="ACCESS-003",
+            department=self.other_department,
+            position=self.other_position,
+            hire_date=date(2026, 3, 1),
+        )
         self.document = HRDocument.objects.create(
             employee=self.profile,
             title="Access Test Contract",
@@ -7221,6 +7963,17 @@ class DocumentAccessServiceTests(TestCase):
             size_bytes=1024,
             uploaded_by=self.hr_admin,
         )
+        self.foreign_document = HRDocument.objects.create(
+            employee=self.foreign_profile,
+            title="Foreign Department Contract",
+            document_type=HRDocument.DocumentType.EMPLOYMENT_CONTRACT,
+            original_filename="foreign-contract.pdf",
+            storage_key="hr-documents/access/foreign-contract.pdf",
+            mime_type="application/pdf",
+            size_bytes=1024,
+            uploaded_by=self.hr_admin,
+        )
+
 
     def test_privileged_roles_can_view_restricted_document(self):
         self.document.confidentiality = "RESTRICTED"
@@ -7268,6 +8021,53 @@ class DocumentAccessServiceTests(TestCase):
             self.access.can_view_document(
                 self.employee, self.document
             )
+        )
+
+    def test_hr_manager_can_view_document_in_own_department(self):
+        self.assertTrue(
+            self.access.can_view_document(
+                self.hr_manager,
+                self.document,
+            )
+        )
+
+    def test_hr_manager_cannot_view_other_department_document(self):
+        self.assertFalse(
+            self.access.can_view_document(
+                self.hr_manager,
+                self.foreign_document,
+            )
+        )
+
+    def test_hr_admin_can_view_other_department_document(self):
+        self.assertTrue(
+            self.access.can_view_document(
+                self.hr_admin,
+                self.foreign_document,
+            )
+        )
+
+    def test_super_admin_can_view_other_department_document(self):
+        self.assertTrue(
+            self.access.can_view_document(
+                self.super_admin,
+                self.foreign_document,
+            )
+        )
+
+    def test_hr_manager_accessible_queryset_is_department_scoped(self):
+        accessible = self.access.get_accessible_documents(
+            self.hr_manager
+        )
+
+        self.assertTrue(
+            accessible.filter(pk=self.document.pk).exists()
+        )
+        self.assertTrue(
+            accessible.filter(pk=self.other_document.pk).exists()
+        )
+        self.assertFalse(
+            accessible.filter(pk=self.foreign_document.pk).exists()
         )
 
     def test_download_requires_verified_status(self):
@@ -9429,7 +10229,49 @@ class DocumentReviewServiceTests(TestCase):
             position=self.position,
             hire_date=date(2026, 1, 15),
         )
+        self.reviewer_profile = EmployeeProfile.objects.create(
+            user=self.reviewer,
+            employee_id="REV-MGR-001",
+            department=self.department,
+            position=self.position,
+            hire_date=date(2026, 1, 15),
+        )
 
+        self.other_department = Department.objects.create(
+            name="Other Review Department",
+            code="OREV",
+        )
+
+        self.other_position = Position.objects.create(
+            title="Other Review Employee",
+            department=self.other_department,
+        )
+
+        self.other_owner = User.objects.create_user(
+            email="review-other-owner@example.com",
+            name="Other Document Owner",
+            password="TestPass123!",
+        )
+
+        self.other_profile = EmployeeProfile.objects.create(
+            user=self.other_owner,
+            employee_id="OREV-001",
+            department=self.other_department,
+            position=self.other_position,
+            hire_date=date(2026, 1, 15),
+        )
+
+        self.other_document = HRDocument.objects.create(
+            employee=self.other_profile,
+            title="Other Department Contract",
+            document_type=HRDocument.DocumentType.EMPLOYMENT_CONTRACT,
+            original_filename="other-contract.pdf",
+            storage_key="hr-documents/review/other-contract.pdf",
+            mime_type="application/pdf",
+            size_bytes=1024,
+            uploaded_by=self.other_owner,
+            status=HRDocument.Status.PENDING_REVIEW,
+        )
         self.document = HRDocument.objects.create(
             employee=self.profile,
             title="Employment Contract",
@@ -9450,6 +10292,77 @@ class DocumentReviewServiceTests(TestCase):
         }
         defaults.update(kwargs)
         return self.service.review_document(**defaults)
+
+    def test_hr_manager_can_review_document_in_own_department(self):
+        review = self.review()
+
+        self.assertEqual(review.document, self.document)
+        self.assertEqual(review.reviewer, self.reviewer)
+
+    def test_hr_manager_cannot_review_other_department_document(self):
+        with self.assertRaises(PermissionDenied):
+            self.service.review_document(
+                document_id=self.other_document.pk,
+                actor=self.reviewer,
+                decision=DocumentReview.Decision.APPROVED,
+            )
+
+        self.assertFalse(
+            DocumentReview.objects.filter(
+                document=self.other_document
+            ).exists()
+        )
+
+        self.other_document.refresh_from_db()
+
+        self.assertEqual(
+            self.other_document.status,
+            HRDocument.Status.PENDING_REVIEW,
+        )
+
+    def test_hr_manager_without_profile_cannot_review_document(self):
+        self.reviewer_profile.delete()
+        self.reviewer.refresh_from_db()
+
+        with self.assertRaises(PermissionDenied):
+            self.review()
+
+        self.assertFalse(
+            DocumentReview.objects.filter(
+                document=self.document
+            ).exists()
+        )
+
+    def test_hr_admin_can_review_other_department_document(self):
+        admin = User.objects.create_user(
+            email="review-admin@example.com",
+            name="HR Administrator",
+            password="TestPass123!",
+            role="HR_ADMIN",
+        )
+
+        review = self.service.review_document(
+            document_id=self.other_document.pk,
+            actor=admin,
+            decision=DocumentReview.Decision.APPROVED,
+        )
+
+        self.assertEqual(review.reviewer, admin)
+
+    def test_super_admin_can_review_other_department_document(self):
+        admin = User.objects.create_superuser(
+            email="review-superadmin@example.com",
+            name="Super Administrator",
+            password="TestPass123!",
+        )
+
+        review = self.service.review_document(
+            document_id=self.other_document.pk,
+            actor=admin,
+            decision=DocumentReview.Decision.APPROVED,
+        )
+
+        self.assertEqual(review.reviewer, admin)
 
     def test_approval_verifies_document_and_records_reviewer(self):
         review = self.review()
@@ -10526,6 +11439,14 @@ class DocumentAccessLogAPITests(TestCase):
             hire_date=date(2026, 1, 15),
         )
 
+        self.manager_profile = EmployeeProfile.objects.create(
+            user=self.hr_manager,
+            employee_id="AUD-MGR-001",
+            department=self.department,
+            position=self.position,
+            hire_date=date(2026, 1, 15),
+        )
+
         self.document = HRDocument.objects.create(
             employee=self.profile,
             title="Audit Test Contract",
@@ -10567,6 +11488,47 @@ class DocumentAccessLogAPITests(TestCase):
             details="Audit test document verified.",
         )
 
+        self.other_department = Department.objects.create(
+            name="Other Audit Department",
+            code="OTH",
+        )
+        self.other_position = Position.objects.create(
+            title="Other Audit Position",
+            department=self.other_department,
+        )
+        self.other_employee = User.objects.create_user(
+            email="audit-other@example.com",
+            name="Other Audit Employee",
+            password="StrongPassword123!",
+            role="EMPLOYEE",
+        )
+        self.other_profile = EmployeeProfile.objects.create(
+            user=self.other_employee,
+            employee_id="OTH-001",
+            department=self.other_department,
+            position=self.other_position,
+            hire_date=date(2026, 1, 15),
+        )
+        self.other_document = HRDocument.objects.create(
+            employee=self.other_profile,
+            title="Other Department Contract",
+            document_type=HRDocument.DocumentType.EMPLOYMENT_CONTRACT,
+            original_filename="other-contract.pdf",
+            storage_key="hr-documents/audit-tests/other-contract.pdf",
+            mime_type="application/pdf",
+            size_bytes=1024,
+            uploaded_by=self.hr_admin,
+        )
+        self.other_log = DocumentAccessLog.objects.create(
+            document=self.other_document,
+            user=self.other_employee,
+            action=DocumentAccessLog.Action.VIEW,
+            ip_address="192.0.2.20",
+            user_agent="DocumentAccessLogAPITests",
+            request_path="/api/v1/employees/hr-documents/",
+            details="Other department document viewed.",
+        )
+
     def authenticate(self, user):
         self.client.force_authenticate(user=user)
 
@@ -10584,6 +11546,40 @@ class DocumentAccessLogAPITests(TestCase):
                     status.HTTP_200_OK,
                 )
                 self.assertGreaterEqual(response.data["count"], 3)
+
+    def test_hr_admin_and_super_admin_retain_global_access(self):
+        for user in (self.hr_admin, self.super_admin):
+            with self.subTest(role=user.role):
+                self.authenticate(user)
+
+                # Verify access to the other department's audit log.
+                list_response = self.client.get(self.url)
+
+                self.assertEqual(
+                    list_response.status_code,
+                    status.HTTP_200_OK,
+                )
+                self.assertIn(
+                    self.other_log.pk,
+                    {
+                        item["id"]
+                        for item in list_response.data["results"]
+                    },
+                )
+
+                # Verify direct retrieval as well.
+                detail_response = self.client.get(
+                    f"{self.url}{self.other_log.pk}/"
+                )
+
+                self.assertEqual(
+                    detail_response.status_code,
+                    status.HTTP_200_OK,
+                )
+                self.assertEqual(
+                    detail_response.data["id"],
+                    self.other_log.pk,
+                )
 
     def test_authorized_hr_role_can_retrieve_audit_log(self):
         self.authenticate(self.hr_admin)
@@ -10689,7 +11685,7 @@ class DocumentAccessLogAPITests(TestCase):
         )
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(response.data["count"], 3)
+        self.assertEqual(response.data["count"], 4)
 
     def test_search_by_details(self):
         self.authenticate(self.hr_admin)
@@ -10747,7 +11743,7 @@ class DocumentAccessLogAPITests(TestCase):
         response = self.client.get(self.url)
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(response.data["count"], 25)
+        self.assertEqual(response.data["count"], 26)
         self.assertEqual(len(response.data["results"]), 20)
         self.assertIsNotNone(response.data["next"])
 
@@ -10782,6 +11778,58 @@ class DocumentAccessLogAPITests(TestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(len(response.data["results"]), 100)
         self.assertIsNotNone(response.data["next"])
+
+    def test_hr_manager_list_is_limited_to_own_department(self):
+        self.authenticate(self.hr_manager)
+
+        response = self.client.get(self.url)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["count"], 3)
+
+        returned_ids = {
+            item["id"]
+            for item in response.data["results"]
+        }
+
+        self.assertEqual(
+            returned_ids,
+            {
+                self.view_log.pk,
+                self.download_log.pk,
+                self.verify_log.pk,
+            },
+        )
+        self.assertNotIn(self.other_log.pk, returned_ids)
+
+    def test_hr_manager_cannot_retrieve_other_department_log(self):
+        self.authenticate(self.hr_manager)
+
+        response = self.client.get(
+            f"{self.url}{self.other_log.pk}/"
+        )
+
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_404_NOT_FOUND,
+        )
+
+    def test_hr_manager_without_profile_is_denied(self):
+        manager_without_profile = User.objects.create_user(
+            email="audit-no-profile@example.com",
+            name="Manager Without Profile",
+            password="StrongPassword123!",
+            role="HR_MANAGER",
+        )
+
+        self.authenticate(manager_without_profile)
+
+        response = self.client.get(self.url)
+
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_403_FORBIDDEN,
+        )
 
 class OnboardingMetricsServiceTests(TestCase):
     """Tests for enterprise onboarding dashboard metrics."""
@@ -10940,6 +11988,109 @@ class OnboardingMetricsServiceTests(TestCase):
             result["progress"]["percentage"],
             33.3,
         )
+
+
+    def test_department_filter_isolates_all_onboarding_metrics(self):
+        from employees.services.onboarding import OnboardingService
+
+        as_of = date(2026, 11, 9)
+
+        # Add tasks to the selected department's journey.
+        self.create_task(
+            title="Completed selected task",
+            status="COMPLETED",
+            priority="HIGH",
+        )
+        self.create_task(
+            title="Cancelled selected task",
+            status="CANCELLED",
+            priority="LOW",
+        )
+        self.create_task(
+            title="Overdue blocked selected task",
+            status="BLOCKED",
+            priority="URGENT",
+            due_date=date(2026, 11, 1),
+        )
+
+        # Create a second department and employee.
+        other_department = Department.objects.create(
+            name="Other Onboarding Department",
+            code="OTHER-ONBOARDING",
+        )
+        other_position = Position.objects.create(
+            title="Other Onboarding Specialist",
+            department=other_department,
+        )
+        other_user = User.objects.create_user(
+            email="other-onboarding-employee@example.com",
+            name="Other Onboarding Employee",
+            password="TestPassword123!",
+            role="EMPLOYEE",
+            is_active=True,
+        )
+        other_employee = EmployeeProfile.objects.create(
+            user=other_user,
+            employee_id="OTHER-ONBOARD-001",
+            department=other_department,
+            position=other_position,
+            hire_date=as_of,
+        )
+
+        # Create a real journey through the onboarding service.
+        other_journey = OnboardingService.create_journey(
+            employee_id=other_employee.pk,
+            template_id=self.journey.template_id,
+            created_by=self.admin,
+        )
+
+        other_journey.status = self.OnboardingJourney.Status.IN_PROGRESS
+        other_journey.save(update_fields=["status"])
+
+        # Add an overdue, urgent task to the other department.
+        other_task = other_journey.tasks.first()
+        other_task.status = self.OnboardingTask.Status.BLOCKED
+        other_task.priority = self.OnboardingTask.Priority.URGENT
+        other_task.due_date = date(2026, 11, 1)
+        other_task.save(
+            update_fields=["status", "priority", "due_date"]
+        )
+
+        result = self.OnboardingMetricsService.get_dashboard(
+            department_id=self.department.pk,
+            as_of=as_of,
+        )
+
+        # Only the selected department's journey is counted.
+        self.assertEqual(result["journeys"]["total"], 1)
+        self.assertEqual(result["journeys"]["pending"], 1)
+        self.assertEqual(result["journeys"]["in_progress"], 0)
+        self.assertEqual(result["journeys"]["suspended"], 0)
+        self.assertEqual(result["journeys"]["completed"], 0)
+        self.assertEqual(result["journeys"]["cancelled"], 0)
+
+        # Only tasks belonging to the selected journey are counted.
+        self.assertEqual(result["tasks"]["total"], 4)
+        self.assertEqual(result["tasks"]["pending"], 1)
+        self.assertEqual(result["tasks"]["completed"], 1)
+        self.assertEqual(result["tasks"]["cancelled"], 1)
+        self.assertEqual(result["tasks"]["blocked"], 1)
+        self.assertEqual(result["tasks"]["overdue"], 1)
+
+        # Priority indicators must also exclude the other department.
+        self.assertEqual(result["tasks"]["low_priority"], 1)
+        self.assertEqual(result["tasks"]["medium_priority"], 1)
+        self.assertEqual(result["tasks"]["high_priority"], 1)
+        self.assertEqual(result["tasks"]["urgent_priority"], 1)
+
+        # Cancelled tasks are excluded from progress calculations.
+        self.assertEqual(
+            result["progress"]["total_eligible_tasks"],
+            3,
+        )
+        self.assertEqual(result["progress"]["completed_tasks"], 1)
+        self.assertEqual(result["progress"]["percentage"], 33.3)
+
 
     def test_department_filter_limits_journeys(self):
         result = self.OnboardingMetricsService.get_dashboard(
@@ -11118,6 +12269,154 @@ class OperationsMetricsServiceTests(TestCase):
             1,
         )
 
+
+    def test_department_filter_isolates_all_operation_metrics(self):
+        from employees.models import (
+            OnboardingJourney,
+            OnboardingTemplate,
+        )
+
+        # Create a second department and its employee.
+        other_department = Department.objects.create(
+            name="Other Operations Department",
+            code="OTHER_OPERATIONS",
+        )
+
+        other_position = Position.objects.create(
+            title="Other Operations Specialist",
+            department=other_department,
+        )
+
+        other_user = User.objects.create_user(
+            email="other-operations-employee@example.com",
+            name="Other Operations Employee",
+            password="TestPassword123!",
+            is_active=True,
+        )
+
+        other_employee = EmployeeProfile.objects.create(
+            user=other_user,
+            employee_id="OTHER-OPERATIONS-001",
+            department=other_department,
+            position=other_position,
+            hire_date=date.today(),
+        )
+
+        # One template can be reused by both onboarding journeys.
+        template = OnboardingTemplate.objects.create(
+            name="Operations Isolation Test Template",
+            created_by=self.admin,
+        )
+
+        # Create one journey per department.
+        own_journey = OnboardingJourney.objects.create(
+            employee=self.employee,
+            template=template,
+            template_version=template.version,
+            created_by=self.admin,
+        )
+
+        other_journey = OnboardingJourney.objects.create(
+            employee=other_employee,
+            template=template,
+            template_version=template.version,
+            created_by=self.admin,
+        )
+
+        # Selected department: three workflow events.
+        self.create_log(
+            journey=own_journey,
+            event_type="TASK_ASSIGNED",
+            outcome="SUCCESS",
+        )
+
+        self.create_log(
+            journey=own_journey,
+            event_type="NOTIFICATION_FAILED",
+            outcome="FAILURE",
+            details={"notification_type": "TASK_ASSIGNED"},
+        )
+
+        self.create_log(
+            journey=own_journey,
+            event_type="TASK_STATUS_CHANGED",
+            outcome="DENIED",
+        )
+
+        # Other department: these events must not appear.
+        self.create_log(
+            journey=other_journey,
+            event_type="TASK_ASSIGNED",
+            outcome="SUCCESS",
+        )
+
+        self.create_log(
+            journey=other_journey,
+            event_type="NOTIFICATION_FAILED",
+            outcome="FAILURE",
+            details={"notification_type": "TASK_COMPLETED"},
+        )
+
+        self.create_log(
+            journey=other_journey,
+            event_type="TASK_STATUS_CHANGED",
+            outcome="DENIED",
+        )
+
+        # An event without a journey must also be excluded.
+        self.create_log(
+            journey=None,
+            event_type="UNLINKED_EVENT",
+            outcome="SUCCESS",
+        )
+
+        result = self.OperationsMetricsService.get_dashboard(
+            department_id=self.department.pk,
+            as_of=timezone.localdate(),
+            days=7,
+        )
+
+        # Workflow outcome isolation.
+        self.assertEqual(result["workflows"]["total"], 3)
+        self.assertEqual(result["workflows"]["success"], 1)
+        self.assertEqual(result["workflows"]["failure"], 1)
+        self.assertEqual(result["workflows"]["denied"], 1)
+
+        # Notification isolation.
+        self.assertEqual(result["notifications"]["failed"], 1)
+        self.assertEqual(
+            result["notifications"]["by_type"],
+            [
+                {
+                    "details__notification_type": "TASK_ASSIGNED",
+                    "count": 1,
+                }
+            ],
+        )
+
+        # Event distribution isolation.
+        distribution = {
+            item["event_type"]: item["count"]
+            for item in result["events"]["distribution"]
+        }
+
+        self.assertEqual(
+            distribution,
+            {
+                "NOTIFICATION_FAILED": 1,
+                "TASK_ASSIGNED": 1,
+                "TASK_STATUS_CHANGED": 1,
+            },
+        )
+
+        self.assertNotIn("UNLINKED_EVENT", distribution)
+
+        # Daily activity must contain only the three selected events.
+        self.assertEqual(
+            sum(item["count"] for item in result["daily_activity"]),
+            3,
+        )
+
     def test_invalid_period_is_rejected(self):
         with self.assertRaises(ValueError):
             self.OperationsMetricsService.get_dashboard(days=0)
@@ -11258,6 +12557,100 @@ class WorkforceMetricsServiceTests(TestCase):
         self.assertEqual(result["headcount"]["total"], 0)
         self.assertEqual(result["departments"]["total"], 0)
 
+
+    def test_department_filter_isolates_all_workforce_metrics(self):
+        # Create an employee in the other department.
+        other_position = Position.objects.create(
+            title="Other Department Specialist",
+            department=self.other_department,
+        )
+
+        other_user = User.objects.create_user(
+            email="other-workforce-employee@example.com",
+            name="Other Workforce Employee",
+            password="TestPassword123!",
+            role="EMPLOYEE",
+            is_active=True,
+        )
+
+        EmployeeProfile.objects.create(
+            user=other_user,
+            employee_id="OTHER-WORK-001",
+            department=self.other_department,
+            position=other_position,
+            hire_date=date(2026, 10, 20),
+        )
+
+        # Add a second active employee to the selected department.
+        second_user = User.objects.create_user(
+            email="second-workforce-employee@example.com",
+            name="Second Workforce Employee",
+            password="TestPassword123!",
+            role="EMPLOYEE",
+            is_active=True,
+        )
+
+        EmployeeProfile.objects.create(
+            user=second_user,
+            employee_id="WORK-003",
+            department=self.department,
+            position=self.position,
+            hire_date=date(2026, 10, 15),
+        )
+
+        result = self.WorkforceMetricsService.get_dashboard(
+            department_id=self.department.pk,
+            as_of=date(2026, 10, 29),
+        )
+
+        # Headcount and account status.
+        self.assertEqual(result["headcount"]["total"], 3)
+        self.assertEqual(result["headcount"]["active_accounts"], 2)
+        self.assertEqual(result["headcount"]["inactive_accounts"], 1)
+
+        # Only the selected department is represented.
+        self.assertEqual(result["departments"]["total"], 1)
+        self.assertEqual(
+            len(result["departments"]["distribution"]),
+            1,
+        )
+        self.assertEqual(
+            result["departments"]["distribution"][0]["department_id"],
+            self.department.pk,
+        )
+        self.assertEqual(
+            result["departments"]["distribution"][0]["employee_count"],
+            3,
+        )
+
+        # Only positions from the selected department are represented.
+        self.assertEqual(result["positions"]["total"], 2)
+
+        position_department_names = {
+            item["department__name"]
+            for item in result["positions"]["distribution"]
+        }
+        self.assertEqual(
+            position_department_names,
+            {self.department.name},
+        )
+
+        # All employees in this fixture have the EMPLOYEE role.
+        self.assertEqual(
+            result["roles"],
+            [
+                {
+                    "user__role": "EMPLOYEE",
+                    "employee_count": 3,
+                }
+            ],
+        )
+
+        # Hiring metrics must exclude the other department.
+        self.assertEqual(result["hires"]["this_month"], 2)
+        self.assertEqual(result["hires"]["this_year"], 3)
+
+
     def test_dashboard_excludes_users_without_employee_profiles(self):
         result = self.WorkforceMetricsService.get_dashboard()
 
@@ -11386,6 +12779,147 @@ class ComplianceMetricsServiceTests(TestCase):
             "expiring_soon_details",
             result["documents"],
         )
+
+
+    def test_department_filter_isolates_all_compliance_metrics(self):
+        from employees.models import HRDocument
+
+        as_of = date(2026, 11, 9)
+
+        # Create a second department and its employee.
+        other_department = Department.objects.create(
+            name="Other Compliance Department",
+            code="OTHER-COMPLIANCE",
+        )
+        other_position = Position.objects.create(
+            title="Other Compliance Specialist",
+            department=other_department,
+        )
+
+        employee_a = self.create_employee(
+            "COMP-ISO-001",
+            "compliance-isolation-a@example.com",
+            phone="",
+            address="",
+        )
+
+        other_user = User.objects.create_user(
+            email="compliance-isolation-b@example.com",
+            name="Other Compliance Employee",
+            password="TestPassword123!",
+            role="EMPLOYEE",
+            is_active=True,
+        )
+
+        employee_b = EmployeeProfile.objects.create(
+            user=other_user,
+            employee_id="COMP-ISO-002",
+            department=other_department,
+            position=other_position,
+            hire_date=date(2026, 1, 15),
+            phone="4015550199",
+            address="456 Other Street",
+        )
+
+        def create_document(employee, document_type, filename, expires_at):
+            return HRDocument.objects.create(
+                employee=employee,
+                title=filename,
+                document_type=document_type,
+                original_filename=filename,
+                storage_key=f"hr-documents/compliance-isolation/{filename}",
+                mime_type="application/pdf",
+                size_bytes=1024,
+                uploaded_by=self.admin,
+                status=HRDocument.Status.VERIFIED,
+                expires_at=expires_at,
+            )
+
+        # Department A: one expired and one soon-expiring document.
+        create_document(
+            employee_a,
+            HRDocument.DocumentType.CERTIFICATION,
+            "a-expired.pdf",
+            date(2026, 11, 1),
+        )
+        create_document(
+            employee_a,
+            HRDocument.DocumentType.CERTIFICATION,
+            "a-expiring-soon.pdf",
+            date(2026, 11, 20),
+        )
+
+        # Department B: valid required documents and its own
+        # expired and soon-expiring documents.
+        for document_type, filename in [
+            (HRDocument.DocumentType.IDENTITY_DOCUMENT, "b-identity.pdf"),
+            (HRDocument.DocumentType.EMPLOYMENT_CONTRACT, "b-contract.pdf"),
+            (HRDocument.DocumentType.TAX_FORM, "b-tax.pdf"),
+        ]:
+            create_document(
+                employee_b,
+                document_type,
+                filename,
+                None,
+            )
+
+        create_document(
+            employee_b,
+            HRDocument.DocumentType.CERTIFICATION,
+            "b-expired.pdf",
+            date(2026, 11, 1),
+        )
+        create_document(
+            employee_b,
+            HRDocument.DocumentType.CERTIFICATION,
+            "b-expiring-soon.pdf",
+            date(2026, 11, 20),
+        )
+
+        result = self.ComplianceMetricsService.get_dashboard(
+            department_id=self.department.pk,
+            as_of=as_of,
+        )
+
+        # Only Department A contributes to the headcount.
+        self.assertEqual(result["headcount"], 1)
+
+        # Profile completion must exclude Department B.
+        self.assertEqual(result["profiles"]["complete"], 0)
+        self.assertEqual(result["profiles"]["incomplete"], 1)
+        self.assertEqual(result["profiles"]["completion_rate"], 0.0)
+
+        # Missing required documents must only concern Department A.
+        self.assertEqual(
+            result["documents"]["compliant_employees"],
+            0,
+        )
+        self.assertEqual(
+            result["documents"]["employees_missing_required_documents"],
+            1,
+        )
+        self.assertEqual(result["documents"]["compliance_rate"], 0.0)
+
+        missing_details = result["documents"]["missing_documents_details"]
+        self.assertEqual(len(missing_details), 1)
+        self.assertEqual(
+            missing_details[0]["employee_name"],
+            employee_a.user.name,
+        )
+
+        # Expired and soon-expiring documents must exclude Department B.
+        self.assertEqual(result["documents"]["expired_count"], 1)
+        self.assertEqual(result["documents"]["expiring_soon_count"], 1)
+
+        self.assertEqual(
+            result["documents"]["expired_details"][0]["employee__user__name"],
+            employee_a.user.name,
+        )
+        self.assertEqual(
+            result["documents"]["expiring_soon_details"][0]["employee__user__name"],
+            employee_a.user.name,
+        )
+
 
     def test_dashboard_supports_department_filter(self):
         self.create_employee(
@@ -11617,41 +13151,7 @@ class SecurityMetricsServiceTests(TestCase):
             sum(item["count"] for item in result["daily_activity"]),
             1,
         )
-    def test_department_filter_excludes_other_department_events(self):
-        self.create_event(
-            event_type="LOGIN_FAILED",
-            user=self.user,
-        )
-        self.create_event(
-            event_type="PRIVILEGE_ESCALATION",
-            user=self.user_b,
-        )
 
-        result = self.SecurityMetricsService.get_dashboard(
-            department_id=self.department_a.id,
-        )
-
-        self.assertEqual(result["overview"]["total_events"], 1)
-        self.assertEqual(result["overview"]["login_failed"], 1)
-        self.assertEqual(result["detections"]["privilege_escalation"], 0)
-
-    def test_department_filter_excludes_events_without_employee_profile(self):
-        self.create_event(
-            event_type="LOGIN_FAILED",
-            user=self.user,
-        )
-        self.create_event(
-            event_type="UNAUTHORIZED_ACCESS",
-            user=None,
-        )
-
-        result = self.SecurityMetricsService.get_dashboard(
-            department_id=self.department_a.id,
-        )
-
-        self.assertEqual(result["overview"]["total_events"], 1)
-        self.assertEqual(result["overview"]["login_failed"], 1)
-        self.assertEqual(result["detections"]["unauthorized_access"], 0)
     def test_invalid_period_is_rejected(self):
         with self.assertRaises(ValueError):
             self.SecurityMetricsService.get_dashboard(days=0)
@@ -11895,6 +13395,251 @@ class AuditMetricsServiceTests(TestCase):
         with self.assertRaises(ValueError):
             self.AuditMetricsService.get_dashboard(recent_limit=0)
 
+    def test_department_filter_isolates_all_audit_sources(self):
+        from django.utils import timezone
+        from accounts.models import AuditLog
+        from employees.models import (
+            Department,
+            Position,
+            EmployeeProfile,
+            HRDocument,
+            OnboardingTemplate,
+            OnboardingJourney,
+        )
+
+        # Create two departments.
+        department_a = Department.objects.create(
+            name="Audit Department A",
+            code="AUD-A",
+        )
+        department_b = Department.objects.create(
+            name="Audit Department B",
+            code="AUD-B",
+        )
+
+        # Create one position per department.
+        position_a = Position.objects.create(
+            title="Audit Employee A",
+            department=department_a,
+        )
+        position_b = Position.objects.create(
+            title="Audit Employee B",
+            department=department_b,
+        )
+
+        # Create employees.
+        user_a = User.objects.create_user(
+            email="audit-department-a@example.com",
+            name="Audit Employee A",
+            password="TestPassword123!",
+            is_active=True,
+        )
+        user_b = User.objects.create_user(
+            email="audit-department-b@example.com",
+            name="Audit Employee B",
+            password="TestPassword123!",
+            is_active=True,
+        )
+
+        employee_a = EmployeeProfile.objects.create(
+            user=user_a,
+            employee_id="AUD-EMP-001",
+            department=department_a,
+            position=position_a,
+            hire_date=timezone.localdate(),
+        )
+        employee_b = EmployeeProfile.objects.create(
+            user=user_b,
+            employee_id="AUD-EMP-002",
+            department=department_b,
+            position=position_b,
+            hire_date=timezone.localdate(),
+        )
+
+        # General audit events belong to the employee's department.
+        AuditLog.objects.create(
+            user=user_a,
+            action="LOGIN",
+            details="Department A audit event",
+        )
+        AuditLog.objects.create(
+            user=user_b,
+            action="PASSWORD_CHANGE",
+            details="Department B audit event",
+        )
+
+        # Create documents owned by employees in different departments.
+        document_a = HRDocument.objects.create(
+            employee=employee_a,
+            title="Department A Document",
+            document_type=HRDocument.DocumentType.OTHER,
+            original_filename="department-a.pdf",
+            storage_key="hr-documents/audit/department-a.pdf",
+            mime_type="application/pdf",
+            size_bytes=1024,
+            uploaded_by=user_a,
+        )
+        document_b = HRDocument.objects.create(
+            employee=employee_b,
+            title="Department B Document",
+            document_type=HRDocument.DocumentType.OTHER,
+            original_filename="department-b.pdf",
+            storage_key="hr-documents/audit/department-b.pdf",
+            mime_type="application/pdf",
+            size_bytes=1024,
+            uploaded_by=user_b,
+        )
+
+        # Document access events must follow document ownership,
+        # not the department of the user performing the action.
+        self.DocumentAccessLog.objects.create(
+            document=document_a,
+            user=self.user,
+            action=self.DocumentAccessLog.Action.VIEW,
+            ip_address="192.0.2.10",
+            request_path="/api/v1/employees/hr-documents/",
+            details="Department A document access",
+        )
+        self.DocumentAccessLog.objects.create(
+            document=document_b,
+            user=self.user,
+            action=self.DocumentAccessLog.Action.DOWNLOAD,
+            ip_address="192.0.2.11",
+            request_path="/api/v1/employees/hr-documents/",
+            details="Department B document access",
+        )
+
+        # Create an onboarding template shared by both journeys.
+        template = OnboardingTemplate.objects.create(
+            name="Audit Metrics Department Template",
+            created_by=self.user,
+        )
+
+        journey_a = OnboardingJourney.objects.create(
+            employee=employee_a,
+            template=template,
+            template_version=template.version,
+            created_by=self.user,
+        )
+        journey_b = OnboardingJourney.objects.create(
+            employee=employee_b,
+            template=template,
+            template_version=template.version,
+            created_by=self.user,
+        )
+
+        # Workflow events must follow the journey employee,
+        # not the actor's department.
+        self.WorkflowExecutionLog.objects.create(
+            journey=journey_a,
+            actor=self.user,
+            event_type="TASK_STATUS_CHANGED",
+            outcome="SUCCESS",
+            details={"department": "A"},
+        )
+        self.WorkflowExecutionLog.objects.create(
+            journey=journey_b,
+            actor=self.user,
+            event_type="TASK_STATUS_CHANGED",
+            outcome="FAILURE",
+            details={"department": "B"},
+        )
+
+        # Create events without a department relationship.
+        AuditLog.objects.create(
+            user=None,
+            action="LOGIN",
+            details="Unassigned audit event",
+        )
+        self.DocumentAccessLog.objects.create(
+            document=None,
+            user=self.user,
+            action=self.DocumentAccessLog.Action.VIEW,
+            ip_address="192.0.2.12",
+            request_path="/api/v1/employees/hr-documents/",
+            details="Unassigned document event",
+        )
+        self.WorkflowExecutionLog.objects.create(
+            journey=None,
+            actor=self.user,
+            event_type="TASK_STATUS_CHANGED",
+            outcome="SUCCESS",
+            details={"department": None},
+        )
+
+        # Request metrics for Department A only.
+        result = self.AuditMetricsService.get_dashboard(
+            department_id=department_a.pk,
+        )
+
+        # Verify overview counts.
+        self.assertEqual(
+            result["overview"]["general_audit_entries"],
+            1,
+        )
+        self.assertEqual(
+            result["overview"]["document_access_entries"],
+            1,
+        )
+        self.assertEqual(
+            result["overview"]["workflow_entries"],
+            1,
+        )
+        self.assertEqual(
+            result["overview"]["total_entries"],
+            3,
+        )
+
+        # Verify general audit distribution.
+        audit_distribution = {
+            item["action"]: item["count"]
+            for item in result["general_audit"]["distribution"]
+        }
+        self.assertEqual(audit_distribution, {"LOGIN": 1})
+
+        # Verify document access distribution.
+        document_distribution = {
+            item["action"]: item["count"]
+            for item in result["document_access"]["distribution"]
+        }
+        self.assertEqual(
+            document_distribution,
+            {"VIEW": 1},
+        )
+
+        # Verify workflow outcomes.
+        self.assertEqual(
+            result["workflows"]["outcomes"]["SUCCESS"],
+            1,
+        )
+        self.assertEqual(
+            result["workflows"]["outcomes"].get("FAILURE", 0),
+            0,
+        )
+
+        # Verify daily activity uses the filtered querysets.
+        self.assertEqual(
+            sum(
+                item["count"]
+                for item in result["daily_activity"]["general_audit"]
+            ),
+            1,
+        )
+        self.assertEqual(
+            sum(
+                item["count"]
+                for item in result["daily_activity"]["document_access"]
+            ),
+            1,
+        )
+        self.assertEqual(
+            sum(
+                item["count"]
+                for item in result["daily_activity"]["workflow"]
+            ),
+            1,
+        )
+
 class RiskMetricsServiceTests(TestCase):
     """Tests for HR compliance, document and security risk indicators."""
 
@@ -12091,6 +13836,123 @@ class RiskMetricsServiceTests(TestCase):
         self.assertIn("document_lifecycle", result)
         self.assertIn("security", result)
 
+
+    def test_department_filter_isolates_all_risk_indicators(self):
+        as_of = date(2026, 11, 9)
+
+        # Create a second department and employee.
+        other_department = Department.objects.create(
+            name="Other Risk Department",
+            code="RISK3",
+        )
+        other_position = Position.objects.create(
+            title="Other Risk Employee",
+            department=other_department,
+        )
+        other_user = User.objects.create_user(
+            email="other-risk-isolation@example.com",
+            name="Other Risk Employee",
+            password="TestPassword123!",
+            is_active=True,
+        )
+        other_profile = EmployeeProfile.objects.create(
+            user=other_user,
+            employee_id="RISK-003",
+            department=other_department,
+            position=other_position,
+            phone="",
+            address="",
+            hire_date=as_of,
+        )
+
+        # Make the employee in the selected department incomplete.
+        self.profile.phone = ""
+        self.profile.address = ""
+        self.profile.save(update_fields=["phone", "address"])
+
+        # Create a quarantined document in each department.
+        self.create_document(
+            status=self.HRDocument.Status.QUARANTINED,
+            suffix="selected-quarantine",
+        )
+        self.HRDocument.objects.create(
+            employee=other_profile,
+            title="Other Department Quarantined",
+            document_type=self.HRDocument.DocumentType.OTHER,
+            original_filename="other-quarantine.pdf",
+            storage_key="hr-documents/risk/other-quarantine.pdf",
+            mime_type="application/pdf",
+            size_bytes=1024,
+            uploaded_by=other_user,
+            status=self.HRDocument.Status.QUARANTINED,
+        )
+
+        # Create expired and soon-expiring verified documents
+        # for both departments.
+        for profile, user, prefix in (
+            (self.profile, self.user, "selected"),
+            (other_profile, other_user, "other"),
+        ):
+            for suffix, expiry in (
+                ("expired", as_of - timedelta(days=1)),
+                ("soon", as_of + timedelta(days=15)),
+            ):
+                self.HRDocument.objects.create(
+                    employee=profile,
+                    title=f"{prefix} {suffix}",
+                    document_type=self.HRDocument.DocumentType.OTHER,
+                    original_filename=f"{prefix}-{suffix}.pdf",
+                    storage_key=f"hr-documents/risk/{prefix}-{suffix}.pdf",
+                    mime_type="application/pdf",
+                    size_bytes=1024,
+                    uploaded_by=user,
+                    status=self.HRDocument.Status.VERIFIED,
+                    expires_at=expiry,
+                )
+
+        # Create one security detection per department.
+        self.create_security_event("BRUTE_FORCE_DETECTED")
+        self.SecurityEvent.objects.create(
+            user=other_user,
+            event_type="BRUTE_FORCE_DETECTED",
+            ip_address="192.0.2.20",
+            request_path="/api/test/",
+            user_agent="Other Risk Test Agent",
+        )
+
+        result = self.RiskMetricsService.get_dashboard(
+            department_id=self.department.pk,
+            as_of=as_of,
+        )
+
+        self.assertEqual(
+            result["document_lifecycle"]["quarantined"],
+            1,
+        )
+        self.assertEqual(
+            result["security"]["brute_force"],
+            1,
+        )
+        self.assertEqual(
+            result["compliance"]["incomplete_profiles"],
+            1,
+        )
+        self.assertEqual(
+            result["compliance"][
+                "employees_missing_required_documents"
+            ],
+            1,
+        )
+        self.assertEqual(
+            result["compliance"]["expired_documents"],
+            1,
+        )
+        self.assertEqual(
+            result["compliance"]["documents_expiring_soon"],
+            1,
+        )
+
+
 class DashboardServiceTests(TestCase):
     """Tests for the dashboard orchestration service."""
 
@@ -12129,8 +13991,13 @@ class DashboardServiceTests(TestCase):
         "employees.services.dashboard.dashboard_service."
         "RiskMetricsService.get_dashboard"
     )
-    def test_dashboard_aggregates_all_seven_services(
+    @patch(
+        "employees.services.dashboard.dashboard_service."
+        "RecruitmentMetricsService.get_dashboard"
+    )
+    def test_dashboard_aggregates_all_eight_services(
         self,
+        recruitment_mock,
         risk_mock,
         audit_mock,
         security_mock,
@@ -12147,6 +14014,7 @@ class DashboardServiceTests(TestCase):
             "security": security_mock,
             "audit": audit_mock,
             "risk": risk_mock,
+            "recruitment": recruitment_mock,
         }
 
         for name, service_mock in services.items():
@@ -12193,8 +14061,13 @@ class DashboardServiceTests(TestCase):
         "employees.services.dashboard.dashboard_service."
         "RiskMetricsService.get_dashboard"
     )
+    @patch(
+        "employees.services.dashboard.dashboard_service."
+        "RecruitmentMetricsService.get_dashboard"
+    )
     def test_dashboard_forwards_parameters_to_services(
         self,
+        recruitment_mock,
         risk_mock,
         audit_mock,
         security_mock,
@@ -12231,6 +14104,11 @@ class DashboardServiceTests(TestCase):
             days=14,
         )
 
+        recruitment_mock.assert_called_once_with(
+            department_id=12,
+            as_of=as_of,
+            days=14,
+        )
         for service_mock in (security_mock, audit_mock):
             service_mock.assert_called_once_with(
                 department_id=12,
@@ -12251,6 +14129,432 @@ class DashboardServiceTests(TestCase):
             "Metrics unavailable",
         ):
             self.DashboardService.get_dashboard()
+
+
+    def test_dashboard_response_matches_serializer_contract(self):
+        """Real dashboard data matches the complete response serializer."""
+
+        from employees.models import (
+            OnboardingTemplate,
+            OnboardingPhase,
+            OnboardingActivityTemplate,
+            OnboardingJourney,
+            OnboardingTask,
+            WorkflowExecutionLog,
+        )
+        from employees.services.onboarding import OnboardingService
+        from employees.serializers import DashboardResponseSerializer
+
+        today = timezone.localdate()
+
+        # --------------------------------------------------
+        # 1. Workforce and compliance fixtures
+        # --------------------------------------------------
+        department = Department.objects.create(
+            name="Dashboard Contract Department",
+            code="DASH-CONTRACT",
+        )
+
+        position = Position.objects.create(
+            title="Dashboard Contract Employee",
+            department=department,
+        )
+
+        user = User.objects.create_user(
+            email="dashboard-contract@example.com",
+            name="Dashboard Contract Employee",
+            password="TestPassword123!",
+            is_active=True,
+        )
+
+        employee = EmployeeProfile.objects.create(
+            user=user,
+            employee_id="DASH-CONTRACT-001",
+            department=department,
+            position=position,
+            hire_date=today,
+        )
+
+        # Intentionally incomplete profile:
+        # phone and address remain blank.
+
+        # --------------------------------------------------
+        # 2. HR documents: compliance and lifecycle metrics
+        # --------------------------------------------------
+        def create_document(suffix, status, expires_at=None):
+            return HRDocument.objects.create(
+                employee=employee,
+                title=f"Dashboard Contract Document {suffix}",
+                document_type=HRDocument.DocumentType.OTHER,
+                original_filename=f"dashboard-{suffix}.pdf",
+                storage_key=f"dashboard-contract/{suffix}.pdf",
+                mime_type="application/pdf",
+                size_bytes=1024,
+                uploaded_by=user,
+                status=status,
+                expires_at=expires_at,
+            )
+
+        create_document(
+            "pending-scan",
+            HRDocument.Status.PENDING_SCAN,
+        )
+        create_document(
+            "pending-review",
+            HRDocument.Status.PENDING_REVIEW,
+        )
+        create_document(
+            "quarantined",
+            HRDocument.Status.QUARANTINED,
+        )
+        create_document(
+            "rejected",
+            HRDocument.Status.REJECTED,
+        )
+        create_document(
+            "expired",
+            HRDocument.Status.VERIFIED,
+            expires_at=today - timedelta(days=1),
+        )
+        create_document(
+            "archived",
+            HRDocument.Status.ARCHIVED,
+        )
+        create_document(
+            "expiring-soon",
+            HRDocument.Status.VERIFIED,
+            expires_at=today + timedelta(days=10),
+        )
+
+        # OTHER documents do not satisfy the required
+        # identity, employment contract and tax document types.
+
+        # --------------------------------------------------
+        # 3. Onboarding fixtures
+        # --------------------------------------------------
+        template = OnboardingTemplate.objects.create(
+            name="Dashboard Contract Template",
+            description="Dashboard response contract test",
+            version=1,
+            created_by=user,
+        )
+
+        phase = OnboardingPhase.objects.create(
+            template=template,
+            name="Contract Test Phase",
+            description="Dashboard contract phase",
+            order=1,
+        )
+
+        activity = OnboardingActivityTemplate.objects.create(
+            phase=phase,
+            name="Contract Test Activity",
+            description="Dashboard contract activity",
+            order=1,
+            is_required=True,
+            default_due_days=3,
+        )
+
+        OnboardingService.publish_template(template.pk)
+
+        journey = OnboardingService.create_journey(
+            employee_id=employee.pk,
+            template_id=template.pk,
+            created_by=user,
+        )
+
+        task = OnboardingTask.objects.get(
+            journey=journey,
+            activity_template=activity,
+        )
+
+        task.priority = "URGENT"
+        task.due_date = today - timedelta(days=1)
+        task.save(update_fields=["priority", "due_date"])
+
+        # --------------------------------------------------
+        # 4. Operations and workflow audit fixtures
+        # --------------------------------------------------
+        WorkflowExecutionLog.objects.create(
+            journey=journey,
+            actor=user,
+            event_type="TASK_STATUS_CHANGED",
+            outcome="SUCCESS",
+            details={"source": "dashboard_contract_test"},
+        )
+
+        WorkflowExecutionLog.objects.create(
+            journey=journey,
+            actor=user,
+            event_type="NOTIFICATION_FAILED",
+            outcome="FAILURE",
+            details={"notification_type": "EMAIL"},
+        )
+
+        # --------------------------------------------------
+        # 5. Security fixtures
+        # --------------------------------------------------
+        SecurityEvent.objects.create(
+            user=user,
+            event_type="LOGIN_SUCCESS",
+            ip_address="192.0.2.10",
+            request_path="/api/test/login/",
+            user_agent="Dashboard Contract Test",
+        )
+
+        SecurityEvent.objects.create(
+            user=user,
+            event_type="BRUTE_FORCE_DETECTED",
+            ip_address="192.0.2.11",
+            request_path="/api/test/login/",
+            user_agent="Dashboard Contract Test",
+        )
+
+        # --------------------------------------------------
+        # 6. General and document-access audit fixtures
+        # --------------------------------------------------
+        AuditLog.objects.create(
+            user=user,
+            action="LOGIN",
+            details="Dashboard contract test",
+        )
+
+        DocumentAccessLog.objects.create(
+            document=HRDocument.objects.get(
+                employee=employee,
+                title="Dashboard Contract Document quarantined",
+            ),
+            user=user,
+            action=DocumentAccessLog.Action.ACCESS_DENIED,
+            ip_address="192.0.2.10",
+            request_path="/api/test/documents/",
+            details="Dashboard contract test",
+        )
+
+        # --------------------------------------------------
+        # 7. Execute the real dashboard and serialize it
+        # --------------------------------------------------
+        dashboard_data = self.DashboardService.get_dashboard(
+            department_id=department.pk,
+            as_of=today,
+            days=7,
+            recent_limit=10,
+        )
+
+        serializer = DashboardResponseSerializer(
+            instance=dashboard_data,
+        )
+
+        serialized_data = serializer.data
+
+        expected_sections = {
+            "workforce",
+            "compliance",
+            "onboarding",
+            "operations",
+            "security",
+            "audit",
+            "risk",
+            "recruitment",
+        }
+
+        self.assertEqual(
+            set(serialized_data.keys()),
+            expected_sections,
+        )
+
+        # --------------------------------------------------
+        # 8. Workforce contract
+        # --------------------------------------------------
+        workforce = serialized_data["workforce"]
+
+        self.assertEqual(workforce["headcount"]["total"], 1)
+        self.assertEqual(workforce["departments"]["total"], 1)
+        self.assertEqual(workforce["positions"]["total"], 1)
+        self.assertTrue(workforce["departments"]["distribution"])
+        self.assertTrue(workforce["positions"]["distribution"])
+        self.assertTrue(workforce["roles"])
+        self.assertEqual(workforce["as_of"], today.isoformat())
+
+        # --------------------------------------------------
+        # 9. Compliance contract
+        # --------------------------------------------------
+        compliance = serialized_data["compliance"]
+
+        self.assertEqual(compliance["headcount"], 1)
+        self.assertEqual(compliance["profiles"]["incomplete"], 1)
+        self.assertEqual(
+            len(compliance["profiles"]["incomplete_details"]),
+            1,
+        )
+        self.assertEqual(
+            compliance["documents"][
+                "employees_missing_required_documents"
+            ],
+            1,
+        )
+        self.assertTrue(
+            compliance["documents"]["missing_documents_details"]
+        )
+        self.assertEqual(compliance["documents"]["expired_count"], 1)
+        self.assertEqual(
+            compliance["documents"]["expiring_soon_count"],
+            1,
+        )
+        self.assertTrue(compliance["documents"]["expired_details"])
+        self.assertTrue(
+            compliance["documents"]["expiring_soon_details"]
+        )
+
+        # --------------------------------------------------
+        # 10. Onboarding contract
+        # --------------------------------------------------
+        onboarding = serialized_data["onboarding"]
+
+        self.assertEqual(onboarding["journeys"]["total"], 1)
+        self.assertEqual(onboarding["tasks"]["total"], 1)
+        self.assertEqual(onboarding["tasks"]["urgent_priority"], 1)
+        self.assertEqual(onboarding["tasks"]["overdue"], 1)
+        self.assertEqual(
+            onboarding["progress"]["total_eligible_tasks"],
+            1,
+        )
+
+        # --------------------------------------------------
+        # 11. Operations contract
+        # --------------------------------------------------
+        operations = serialized_data["operations"]
+
+        self.assertEqual(operations["workflows"]["total"], 2)
+        self.assertEqual(operations["workflows"]["success"], 1)
+        self.assertEqual(operations["workflows"]["failure"], 1)
+        self.assertEqual(operations["notifications"]["failed"], 1)
+        self.assertTrue(operations["notifications"]["by_type"])
+        self.assertTrue(operations["events"]["distribution"])
+        self.assertTrue(operations["daily_activity"])
+
+        # --------------------------------------------------
+        # 12. Security contract
+        # --------------------------------------------------
+        security = serialized_data["security"]
+
+        self.assertEqual(security["overview"]["total_events"], 2)
+        self.assertEqual(security["overview"]["login_success"], 1)
+        self.assertEqual(security["detections"]["brute_force"], 1)
+        self.assertTrue(security["events"]["distribution"])
+        self.assertTrue(security["daily_activity"])
+        self.assertEqual(len(security["recent_events"]), 2)
+
+        # --------------------------------------------------
+        # 13. Audit contract
+        # --------------------------------------------------
+        audit = serialized_data["audit"]
+
+        self.assertEqual(
+            audit["overview"]["general_audit_entries"],
+            1,
+        )
+        self.assertEqual(
+            audit["overview"]["document_access_entries"],
+            1,
+        )
+        self.assertEqual(
+            audit["overview"]["workflow_entries"],
+            2,
+        )
+        self.assertEqual(
+            audit["document_access"]["access_denied"],
+            1,
+        )
+        self.assertTrue(audit["general_audit"]["distribution"])
+        self.assertTrue(audit["document_access"]["distribution"])
+        self.assertTrue(audit["workflows"]["distribution"])
+        self.assertTrue(audit["workflows"]["outcomes"])
+        self.assertTrue(audit["recent_events"]["general_audit"])
+        self.assertTrue(audit["recent_events"]["document_access"])
+        self.assertTrue(audit["recent_events"]["workflow"])
+
+        # --------------------------------------------------
+        # 14. Risk contract
+        # --------------------------------------------------
+        risk = serialized_data["risk"]
+
+        self.assertEqual(risk["compliance"]["incomplete_profiles"], 1)
+        self.assertEqual(
+            risk["compliance"]["employees_missing_required_documents"],
+            1,
+        )
+        self.assertEqual(risk["compliance"]["expired_documents"], 1)
+        self.assertEqual(
+            risk["compliance"]["documents_expiring_soon"],
+            1,
+        )
+
+        self.assertEqual(
+            risk["document_lifecycle"]["pending_scan"],
+            1,
+        )
+        self.assertEqual(
+            risk["document_lifecycle"]["pending_review"],
+            1,
+        )
+        self.assertEqual(
+            risk["document_lifecycle"]["quarantined"],
+            1,
+        )
+        self.assertEqual(
+            risk["document_lifecycle"]["rejected"],
+            1,
+        )
+        self.assertEqual(
+            risk["document_lifecycle"]["verified"],
+            2,
+        )
+        self.assertEqual(
+            risk["document_lifecycle"]["archived"],
+            1,
+        )
+
+        self.assertEqual(risk["security"]["brute_force"], 1)
+
+        self.assertNotIn("risk_score", risk)
+        # --------------------------------------------------
+        # 15. Recruitment contract
+        # --------------------------------------------------
+        recruitment = serialized_data["recruitment"]
+
+        self.assertEqual(
+            recruitment["job_postings"]["total"],
+            0,
+        )
+        self.assertTrue(recruitment["job_postings"]["by_status"])
+        self.assertTrue(
+            all(
+                item["count"] == 0
+                for item in recruitment["job_postings"]["by_status"]
+            )
+        )
+
+        self.assertEqual(
+            recruitment["applications"]["total"],
+            0,
+        )
+        self.assertTrue(recruitment["applications"]["by_status"])
+        self.assertTrue(
+            all(
+                item["count"] == 0
+                for item in recruitment["applications"]["by_status"]
+            )
+        )
+        self.assertEqual(
+            recruitment["applications"]["received_in_period"],
+            0,
+        )
+        self.assertEqual(
+            recruitment["applications"]["hired_in_period"],
+            0,
+        )
+        self.assertEqual(recruitment["daily_activity"], [])
 
 class DashboardFilterSerializerTests(TestCase):
     """Tests for the HR dashboard filter serializer."""
@@ -12775,6 +15079,105 @@ class DashboardAPITests(TestCase):
 
         mock_service.assert_not_called()
 
+    def test_security_event_details_are_redacted_for_hr_manager_only(self):
+        """HR managers cannot see individual IP addresses or request paths."""
+
+        users = (
+            (self.hr_manager, True),
+            (self.hr_admin, False),
+            (self.super_admin, False),
+        )
+
+        for user, should_redact in users:
+            with self.subTest(role=user.role):
+                self.client.force_authenticate(user=user)
+
+                dashboard_data = {
+                    **self.dashboard_data,
+                    "security": {
+                        "security_events": 1,
+                        "recent_events": [{
+                            "id": 1,
+                            "event_type": "LOGIN_FAILED",
+                            "ip_address": "203.0.113.10",
+                            "request_path": "/api/v1/accounts/login/",
+                            "created_at": timezone.now(),
+                        }],
+                    },
+                }
+
+                with patch(
+                    "employees.views.DashboardService.get_dashboard",
+                    return_value=dashboard_data,
+                ):
+                    response = self.client.get(self.dashboard_url)
+
+                self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+                event = response.data["security"]["recent_events"][0]
+
+                if should_redact:
+                    self.assertIsNone(event["ip_address"])
+                    self.assertEqual(event["request_path"], "")
+                else:
+                    self.assertEqual(event["ip_address"], "203.0.113.10")
+                    self.assertEqual(
+                        event["request_path"],
+                        "/api/v1/accounts/login/",
+                    )
+
+        self.client.force_authenticate(user=None)
+
+    def test_security_event_details_are_redacted_for_hr_manager_only(self):
+        """HR managers cannot see individual IP addresses or request paths."""
+
+        users = (
+            (self.hr_manager, True),
+            (self.hr_admin, False),
+            (self.super_admin, False),
+        )
+
+        for user, should_redact in users:
+            with self.subTest(role=user.role):
+                self.client.force_authenticate(user=user)
+
+                dashboard_data = {
+                    **self.dashboard_data,
+                    "security": {
+                        "security_events": 1,
+                        "recent_events": [{
+                            "id": 1,
+                            "event_type": "LOGIN_FAILED",
+                            "ip_address": "203.0.113.10",
+                            "request_path": "/api/v1/accounts/login/",
+                            "created_at": timezone.now(),
+                        }],
+                    },
+                }
+
+                with patch(
+                    "employees.views.DashboardService.get_dashboard",
+                    return_value=dashboard_data,
+                ):
+                    response = self.client.get(self.dashboard_url)
+
+                self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+                event = response.data["security"]["recent_events"][0]
+
+                if should_redact:
+                    self.assertIsNone(event["ip_address"])
+                    self.assertEqual(event["request_path"], "")
+                else:
+                    self.assertEqual(event["ip_address"], "203.0.113.10")
+                    self.assertEqual(
+                        event["request_path"],
+                        "/api/v1/accounts/login/",
+                    )
+
+        self.client.force_authenticate(user=None)
+
+
     def test_hr_manager_without_profile_is_denied(self):
         """HR managers without an employee profile are denied."""
 
@@ -12800,3 +15203,590 @@ class DashboardAPITests(TestCase):
         )
 
         mock_service.assert_not_called()
+
+
+class RotateBankEncryptionKeyCommandTests(TestCase):
+    """Tests for secure bank encryption key rotation."""
+
+    def setUp(self):
+        self.old_key = Fernet.generate_key()
+        self.new_key = Fernet.generate_key()
+
+        self.user = User.objects.create_user(
+            email="rotation@example.com",
+            name="Rotation Employee",
+            password="TestPass123!",
+        )
+
+        self.department = Department.objects.create(
+            name="Rotation Department",
+            code="ROT",
+        )
+
+        self.position = Position.objects.create(
+            title="Rotation Accountant",
+            department=self.department,
+        )
+
+        self.employee = EmployeeProfile.objects.create(
+            user=self.user,
+            employee_id="EMP-ROT-001",
+            department=self.department,
+            position=self.position,
+            hire_date=date(2026, 1, 1),
+        )
+
+        self.old_fernet = Fernet(self.old_key)
+        self.new_fernet = Fernet(self.new_key)
+
+        self.env = {
+            "BANK_ENCRYPTION_KEY": self.new_key.decode(),
+            "BANK_ENCRYPTION_OLD_KEYS": self.old_key.decode(),
+        }
+
+    def insert_raw_rows(self, rows):
+        """Insert encrypted values directly into the database."""
+
+        quote = connection.ops.quote_name
+
+        table = quote("employees_bankaccount")
+
+        columns = [
+            "employee_id",
+            "account_type",
+            "routing_number",
+            "account_number",
+            "last_four",
+            "is_primary",
+            "is_verified",
+            "created_at",
+            "updated_at",
+        ]
+
+        quoted_columns = ", ".join(
+            quote(column) for column in columns
+        )
+
+        placeholders = ", ".join(["%s"] * len(columns))
+
+        sql = (
+            f"INSERT INTO {table} "
+            f"({quoted_columns}) VALUES ({placeholders})"
+        )
+
+        now = timezone.now()
+
+        parameters = [
+            (
+                self.employee.pk,
+                "CHECKING",
+                routing_token,
+                account_token,
+                last_four,
+                False,
+                False,
+                now,
+                now,
+            )
+            for routing_token, account_token, last_four in rows
+        ]
+
+        with connection.cursor() as cursor:
+            cursor.executemany(sql, parameters)
+
+    def fetch_raw_rows(self):
+        """Read encrypted values without ORM decryption."""
+
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT routing_number, account_number
+                FROM employees_bankaccount
+                ORDER BY id
+                """
+            )
+            return cursor.fetchall()
+
+    def make_old_tokens(self):
+        """Create tokens encrypted with the previous key."""
+
+        return (
+            self.old_fernet.encrypt(b"123456789").decode(),
+            self.old_fernet.encrypt(b"9876543210").decode(),
+            "3210",
+        )
+
+    def test_dry_run_does_not_modify_database(self):
+        """Dry-run validates data without changing encrypted values."""
+
+        self.insert_raw_rows([self.make_old_tokens()])
+
+        original_rows = self.fetch_raw_rows()
+
+        from io import StringIO
+
+        output = StringIO()
+
+        with patch.dict("os.environ", self.env):
+            call_command(
+                "rotate_bank_encryption_key",
+                dry_run=True,
+                stdout=output,
+            )
+
+        self.assertEqual(
+            self.fetch_raw_rows(),
+            original_rows,
+        )
+
+        self.assertIn("DRY RUN", output.getvalue())
+        self.assertIn("Fields that would be rotated: 2", output.getvalue())
+
+    def test_confirm_rotates_data_to_primary_key(self):
+        """Confirmed rotation must use the new primary key."""
+
+        self.insert_raw_rows([self.make_old_tokens()])
+
+        with patch.dict("os.environ", self.env):
+            call_command("rotate_bank_encryption_key", confirm=True)
+
+        rows = self.fetch_raw_rows()
+
+        self.assertEqual(len(rows), 1)
+
+        self.assertEqual(
+            self.new_fernet.decrypt(rows[0][0].encode()).decode(),
+            "123456789",
+        )
+
+        self.assertEqual(
+            self.new_fernet.decrypt(rows[0][1].encode()).decode(),
+            "9876543210",
+        )
+
+    def test_already_rotated_data_is_not_modified(self):
+        """Values already using the primary key must remain unchanged."""
+
+        routing_token = self.new_fernet.encrypt(
+            b"123456789"
+        ).decode()
+
+        account_token = self.new_fernet.encrypt(
+            b"9876543210"
+        ).decode()
+
+        self.insert_raw_rows([
+            (routing_token, account_token, "3210")
+        ])
+
+        original_rows = self.fetch_raw_rows()
+
+        from io import StringIO
+
+        output = StringIO()
+
+        with patch.dict("os.environ", self.env):
+            call_command(
+                "rotate_bank_encryption_key",
+                confirm=True,
+                stdout=output,
+            )
+
+        self.assertEqual(
+            self.fetch_raw_rows(),
+            original_rows,
+        )
+
+        self.assertIn("Fields rotated: 0", output.getvalue())
+
+    def test_corrupted_data_rolls_back_entire_rotation(self):
+        """A failure must roll back all earlier updates."""
+
+        valid_row = self.make_old_tokens()
+
+        corrupted_row = (
+            "INVALID-ENCRYPTED-DATA",
+            self.old_fernet.encrypt(b"9876543210").decode(),
+            "3210",
+        )
+
+        self.insert_raw_rows([valid_row, corrupted_row])
+
+        original_rows = self.fetch_raw_rows()
+
+        with patch.dict("os.environ", self.env):
+            with self.assertRaises(CommandError) as context:
+                call_command(
+                    "rotate_bank_encryption_key",
+                    confirm=True,
+                )
+
+        self.assertEqual(
+            self.fetch_raw_rows(),
+            original_rows,
+        )
+
+        self.assertNotIn(
+            "123456789",
+            str(context.exception),
+        )
+
+        self.assertNotIn(
+            "9876543210",
+            str(context.exception),
+        )
+
+    def test_rotation_processes_more_than_one_batch(self):
+        """Rotation must process all records beyond the batch size."""
+
+        tokens = self.make_old_tokens()
+
+        rows_to_insert = [
+            tokens for _ in range(501)
+        ]
+
+        self.insert_raw_rows(rows_to_insert)
+
+        from io import StringIO
+
+        output = StringIO()
+
+        with patch.dict("os.environ", self.env):
+            call_command(
+                "rotate_bank_encryption_key",
+                confirm=True,
+                stdout=output,
+            )
+
+        rows = self.fetch_raw_rows()
+
+        self.assertEqual(len(rows), 501)
+
+        self.assertIn("Rows scanned: 501", output.getvalue())
+        self.assertIn("Rows updated: 501", output.getvalue())
+        self.assertIn("Fields rotated: 1002", output.getvalue())
+
+        for routing_token, account_token in rows:
+            self.assertEqual(
+                self.new_fernet.decrypt(
+                    routing_token.encode()
+                ).decode(),
+                "123456789",
+            )
+
+            self.assertEqual(
+                self.new_fernet.decrypt(
+                    account_token.encode()
+                ).decode(),
+                "9876543210",
+            )
+
+
+class RecruitmentMetricsServiceTests(TestCase):
+    """Tests for aggregate recruitment dashboard metrics."""
+
+    def setUp(self):
+        from recruitment.models import (
+            ApplicationStatusHistory,
+            Candidate,
+            JobApplication,
+            JobPosting,
+        )
+        from employees.services.dashboard.recruitment_metrics import (
+            RecruitmentMetricsService,
+        )
+
+        self.ApplicationStatusHistory = ApplicationStatusHistory
+        self.Candidate = Candidate
+        self.JobApplication = JobApplication
+        self.JobPosting = JobPosting
+        self.RecruitmentMetricsService = RecruitmentMetricsService
+
+        self.user = User.objects.create_user(
+            email="recruitment.metrics@example.com",
+            name="Recruitment Metrics Admin",
+            password="StrongPassword123!",
+            role=User.Role.HR_ADMIN,
+        )
+
+        self.department = Department.objects.create(
+            name="Metrics HR",
+            code="MET-HR",
+        )
+        self.position = Position.objects.create(
+            title="HR Specialist",
+            department=self.department,
+        )
+
+        self.other_department = Department.objects.create(
+            name="Metrics Finance",
+            code="MET-FIN",
+        )
+        self.other_position = Position.objects.create(
+            title="Financial Analyst",
+            department=self.other_department,
+        )
+
+        self.as_of = timezone.localdate()
+
+    def create_posting(self, *, department=None, position=None, status=None):
+        department = department or self.department
+        position = position or self.position
+
+        return self.JobPosting.objects.create(
+            title=f"Posting {department.code} {status or 'DRAFT'}",
+            department=department,
+            position=position,
+            description="Dashboard metrics test posting.",
+            employment_type=self.JobPosting.EmploymentType.FULL_TIME,
+            created_by=self.user,
+            status=status or self.JobPosting.Status.DRAFT,
+        )
+
+    def create_application(self, *, posting, status=None, email):
+        candidate = self.Candidate.objects.create(
+            first_name="Metrics",
+            last_name="Candidate",
+            email=email,
+            department=posting.department,
+        )
+
+        return self.JobApplication.objects.create(
+            candidate=candidate,
+            job_posting=posting,
+            status=status or self.JobApplication.Status.SUBMITTED,
+            privacy_consent=True,
+            privacy_consent_at=timezone.now(),
+        )
+
+    def test_returns_complete_status_distributions(self):
+        posting = self.create_posting(
+            status=self.JobPosting.Status.OPEN
+        )
+        self.create_application(
+            posting=posting,
+            status=self.JobApplication.Status.SCREENING,
+            email="screening.metrics@example.com",
+        )
+
+        result = self.RecruitmentMetricsService.get_dashboard(
+            department_id=self.department.pk,
+            as_of=self.as_of,
+        )
+
+        posting_counts = {
+            item["status"]: item["count"]
+            for item in result["job_postings"]["by_status"]
+        }
+        application_counts = {
+            item["status"]: item["count"]
+            for item in result["applications"]["by_status"]
+        }
+
+        self.assertEqual(result["job_postings"]["total"], 1)
+        self.assertEqual(result["applications"]["total"], 1)
+
+        self.assertEqual(
+            posting_counts[self.JobPosting.Status.OPEN],
+            1,
+        )
+        self.assertEqual(
+            posting_counts[self.JobPosting.Status.DRAFT],
+            0,
+        )
+        self.assertEqual(
+            application_counts[self.JobApplication.Status.SCREENING],
+            1,
+        )
+        self.assertEqual(
+            application_counts[self.JobApplication.Status.HIRED],
+            0,
+        )
+
+    def test_department_filter_excludes_other_department_data(self):
+        own_posting = self.create_posting(
+            status=self.JobPosting.Status.OPEN
+        )
+        other_posting = self.create_posting(
+            department=self.other_department,
+            position=self.other_position,
+            status=self.JobPosting.Status.CLOSED,
+        )
+
+        self.create_application(
+            posting=own_posting,
+            email="own.metrics@example.com",
+        )
+        self.create_application(
+            posting=other_posting,
+            email="other.metrics@example.com",
+        )
+
+        result = self.RecruitmentMetricsService.get_dashboard(
+            department_id=self.department.pk,
+            as_of=self.as_of,
+        )
+
+        self.assertEqual(result["job_postings"]["total"], 1)
+        self.assertEqual(result["applications"]["total"], 1)
+        self.assertEqual(
+            result["applications"]["received_in_period"],
+            1,
+        )
+
+        self.assertNotIn(
+            self.JobPosting.Status.CLOSED,
+            [
+                item["status"]
+                for item in result["job_postings"]["by_status"]
+                if item["count"] > 0
+            ],
+        )
+
+    def test_hired_in_period_counts_status_transitions(self):
+        posting = self.create_posting(
+            status=self.JobPosting.Status.OPEN
+        )
+        application = self.create_application(
+            posting=posting,
+            status=self.JobApplication.Status.HIRED,
+            email="hired.metrics@example.com",
+        )
+
+        self.ApplicationStatusHistory.objects.create(
+            application=application,
+            previous_status=self.JobApplication.Status.OFFER,
+            new_status=self.JobApplication.Status.HIRED,
+            changed_by=self.user,
+        )
+
+        result = self.RecruitmentMetricsService.get_dashboard(
+            department_id=self.department.pk,
+            as_of=self.as_of,
+        )
+
+        self.assertEqual(
+            result["applications"]["by_status"][
+                list(self.JobApplication.Status.values).index(
+                    self.JobApplication.Status.HIRED
+                )
+            ]["count"],
+            1,
+        )
+        self.assertEqual(
+            result["applications"]["hired_in_period"],
+            1,
+        )
+
+    def test_period_excludes_applications_and_hires_before_start_date(self):
+        posting = self.create_posting(
+            status=self.JobPosting.Status.OPEN
+        )
+
+        old_application = self.create_application(
+            posting=posting,
+            email="old.metrics@example.com",
+        )
+        current_application = self.create_application(
+            posting=posting,
+            email="current.metrics@example.com",
+        )
+
+        start_date = self.as_of - timedelta(days=6)
+        start_datetime = timezone.make_aware(
+            datetime.combine(start_date, datetime.min.time())
+        )
+        old_datetime = start_datetime - timedelta(seconds=1)
+
+        self.JobApplication.objects.filter(
+            pk=old_application.pk
+        ).update(applied_at=old_datetime)
+
+        self.JobApplication.objects.filter(
+            pk=current_application.pk
+        ).update(applied_at=start_datetime)
+
+        self.ApplicationStatusHistory.objects.create(
+            application=old_application,
+            previous_status=self.JobApplication.Status.OFFER,
+            new_status=self.JobApplication.Status.HIRED,
+            changed_by=self.user,
+        )
+        self.ApplicationStatusHistory.objects.create(
+            application=current_application,
+            previous_status=self.JobApplication.Status.OFFER,
+            new_status=self.JobApplication.Status.HIRED,
+            changed_by=self.user,
+        )
+
+        # Move the old history entry outside the reporting period.
+        self.ApplicationStatusHistory.objects.filter(
+            application=old_application
+        ).update(created_at=old_datetime)
+
+        result = self.RecruitmentMetricsService.get_dashboard(
+            department_id=self.department.pk,
+            as_of=self.as_of,
+            days=7,
+        )
+
+        self.assertEqual(
+            result["applications"]["total"],
+            2,
+        )
+        self.assertEqual(
+            result["applications"]["received_in_period"],
+            1,
+        )
+        self.assertEqual(
+            result["applications"]["hired_in_period"],
+            1,
+        )
+
+    def test_daily_activity_contains_only_period_applications(self):
+        posting = self.create_posting(
+            status=self.JobPosting.Status.OPEN
+        )
+        application = self.create_application(
+            posting=posting,
+            email="daily.metrics@example.com",
+        )
+
+        result = self.RecruitmentMetricsService.get_dashboard(
+            department_id=self.department.pk,
+            as_of=self.as_of,
+        )
+
+        self.assertEqual(
+            sum(item["count"] for item in result["daily_activity"]),
+            1,
+        )
+        self.assertEqual(
+            result["daily_activity"][0]["count"],
+            1,
+        )
+
+    def test_dashboard_does_not_expose_candidate_personal_data(self):
+        posting = self.create_posting()
+        self.create_application(
+            posting=posting,
+            email="private.metrics@example.com",
+        )
+
+        result = self.RecruitmentMetricsService.get_dashboard(
+            department_id=self.department.pk,
+            as_of=self.as_of,
+        )
+
+        serialized_result = str(result).lower()
+
+        self.assertNotIn("private.metrics@example.com", serialized_result)
+        self.assertNotIn("candidate", result["applications"])
+        self.assertNotIn("email", result["applications"])
+
+    def test_rejects_days_less_than_one(self):
+        with self.assertRaisesMessage(
+            ValueError,
+            "days must be greater than or equal to 1.",
+        ):
+            self.RecruitmentMetricsService.get_dashboard(days=0)
