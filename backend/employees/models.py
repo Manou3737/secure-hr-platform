@@ -2293,3 +2293,92 @@ class DocumentAccessLog(models.Model):
 
     def __str__(self):
         return f"{self.action} - {self.created_at}"
+
+class NotificationJob(models.Model):
+    """Durable, retryable notification queue."""
+
+    class NotificationType(models.TextChoices):
+        TASK_ASSIGNED = "TASK_ASSIGNED", "Task assigned"
+        TASK_OVERDUE = "TASK_OVERDUE", "Task overdue"
+        DOCUMENT_EXPIRING = "DOCUMENT_EXPIRING", "Document expiring"
+        TASK_COMPLETED = "TASK_COMPLETED", "Task completed"
+
+    class Status(models.TextChoices):
+        PENDING = "PENDING", "Pending"
+        PROCESSING = "PROCESSING", "Processing"
+        SUCCESS = "SUCCESS", "Success"
+        FAILED = "FAILED", "Failed"
+
+    id = models.UUIDField(
+        primary_key=True,
+        default=uuid.uuid4,
+        editable=False,
+    )
+
+    notification_type = models.CharField(
+        max_length=30,
+        choices=NotificationType.choices,
+        db_index=True,
+    )
+
+    idempotency_key = models.CharField(
+        max_length=255,
+        unique=True,
+    )
+
+    status = models.CharField(
+        max_length=20,
+        choices=Status.choices,
+        default=Status.PENDING,
+        db_index=True,
+    )
+
+    attempts = models.PositiveIntegerField(default=0)
+    max_attempts = models.PositiveIntegerField(default=5)
+
+    next_attempt_at = models.DateTimeField(
+        default=timezone.now,
+        db_index=True,
+    )
+
+    correlation_id = models.UUIDField(
+        null=True,
+        blank=True,
+        db_index=True,
+    )
+
+    payload = models.JSONField(default=dict)
+
+    last_error = models.CharField(
+        max_length=500,
+        blank=True,
+    )
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["created_at"]
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(max_attempts__gt=0),
+                name="notification_max_attempts_positive",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(attempts__lte=models.F("max_attempts")),
+                name="notification_attempts_within_limit",
+            ),
+        ]
+        indexes = [
+            models.Index(
+                fields=["status", "next_attempt_at"],
+                name="notif_status_next_idx",
+            ),
+            models.Index(
+                fields=["notification_type", "created_at"],
+                name="notif_type_created_idx",
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.notification_type} - {self.status}"

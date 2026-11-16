@@ -4,7 +4,7 @@ from unittest.mock import patch
 from cryptography.fernet import Fernet
 from employees.encryption import encrypt_bank_data, decrypt_bank_data
 from accounts.models import User, SecurityEvent, AuditLog
-
+import uuid
 from rest_framework import status
 from rest_framework.test import APIClient
 from copy import deepcopy
@@ -49,6 +49,7 @@ from .models import (
     DocumentReview,
     DocumentAccessLog,
     DocumentRetentionPolicy,
+    NotificationJob,
 )
 from unittest.mock import patch
 from employees.antivirus import AntivirusUnavailable, MalwareDetected
@@ -9567,9 +9568,8 @@ class OnboardingNotificationServiceTests(TestCase):
         )
         self.task = self.journey.tasks.get()
 
-    def test_task_assignment_notification_uses_assignee(self):
-        from unittest.mock import patch
-
+    def test_task_assignment_notification_creates_job(self):
+        from employees.models import NotificationJob
         from employees.services.onboarding_notifications import (
             OnboardingNotificationService,
         )
@@ -9577,152 +9577,432 @@ class OnboardingNotificationServiceTests(TestCase):
         self.task.assigned_to = self.employee_user
         self.task.save(update_fields=["assigned_to"])
 
-        with patch(
-            "employees.services.onboarding_notifications.send_mail"
-        ) as mock_send_mail:
-            with self.captureOnCommitCallbacks(execute=True) as callbacks:
-                result = OnboardingNotificationService.notify_task_assigned(
-                    task_id=self.task.pk,
-                )
-
-            self.assertTrue(result)
-            self.assertEqual(len(callbacks), 1)
-            mock_send_mail.assert_called_once()
-
-        kwargs = mock_send_mail.call_args.kwargs
-        self.assertEqual(
-            kwargs["recipient_list"],
-            [self.employee_user.email],
+        result = OnboardingNotificationService.notify_task_assigned(
+            task_id=self.task.pk,
         )
-        self.assertNotIn("Confidential task title", kwargs["message"])
-        self.assertNotIn(
-            "Confidential task description",
-            kwargs["message"],
-        )
-        self.assertNotIn(
-            self.employee_user.email,
-            kwargs["message"],
-        )
-
-    def test_unassigned_task_does_not_send_notification(self):
-        from unittest.mock import patch
-
-        from employees.services.onboarding_notifications import (
-            OnboardingNotificationService,
-        )
-
-        with patch(
-            "employees.services.onboarding_notifications.send_mail"
-        ) as mock_send_mail:
-            result = OnboardingNotificationService.notify_task_assigned(
-                task_id=self.task.pk,
-            )
-
-        self.assertFalse(result)
-        mock_send_mail.assert_not_called()
-
-    def test_incomplete_task_does_not_send_completion_notification(self):
-        from unittest.mock import patch
-
-        from employees.services.onboarding_notifications import (
-            OnboardingNotificationService,
-        )
-
-        with patch(
-            "employees.services.onboarding_notifications.send_mail"
-        ) as mock_send_mail:
-            result = OnboardingNotificationService.notify_task_completed(
-                task_id=self.task.pk,
-            )
-
-        self.assertFalse(result)
-        mock_send_mail.assert_not_called()
-
-    def test_email_failure_is_logged_without_exposing_email(self):
-        from unittest.mock import patch
-
-        from employees.models import WorkflowExecutionLog
-        from employees.services.onboarding_notifications import (
-            OnboardingNotificationService,
-        )
-
-        self.task.assigned_to = self.employee_user
-        self.task.save(update_fields=["assigned_to"])
-
-        with patch(
-            "employees.services.onboarding_notifications.send_mail",
-            side_effect=RuntimeError("Simulated email failure"),
-        ):
-            with self.captureOnCommitCallbacks(execute=True):
-                result = OnboardingNotificationService.notify_task_assigned(
-                    task_id=self.task.pk,
-                )
 
         self.assertTrue(result)
 
-        log = WorkflowExecutionLog.objects.get(
-            task=self.task,
-            event_type="NOTIFICATION_FAILED",
+        job = NotificationJob.objects.get(
+            notification_type=NotificationJob.NotificationType.TASK_ASSIGNED,
+        )
+
+        self.assertEqual(job.status, NotificationJob.Status.PENDING)
+        self.assertEqual(
+            job.payload["task_id"],
+            str(self.task.pk),
         )
         self.assertEqual(
-            log.outcome,
-            WorkflowExecutionLog.Outcome.FAILURE,
+            job.payload["recipient_user_id"],
+            str(self.employee_user.pk),
         )
-        self.assertEqual(
-            log.details,
-            {"notification_type": "TASK_ASSIGNED"},
-        )
+        self.assertNotIn(self.employee_user.email, str(job.payload))
+        self.assertNotIn("Confidential task title", str(job.payload))
         self.assertNotIn(
-            self.employee_user.email,
-            str(log.details),
+            "Confidential task description",
+            str(job.payload),
         )
 
-    def test_assignment_service_triggers_assignee_notification(self):
-        from unittest.mock import patch
+    def test_unassigned_task_does_not_create_job(self):
+        from employees.models import NotificationJob
+        from employees.services.onboarding_notifications import (
+            OnboardingNotificationService,
+        )
 
+        result = OnboardingNotificationService.notify_task_assigned(
+            task_id=self.task.pk,
+        )
+
+        self.assertFalse(result)
+        self.assertEqual(NotificationJob.objects.count(), 0)
+
+    def test_incomplete_task_does_not_create_completion_job(self):
+        from employees.models import NotificationJob
+        from employees.services.onboarding_notifications import (
+            OnboardingNotificationService,
+        )
+
+        result = OnboardingNotificationService.notify_task_completed(
+            task_id=self.task.pk,
+        )
+
+        self.assertFalse(result)
+        self.assertEqual(NotificationJob.objects.count(), 0)
+
+    def test_duplicate_assignment_notification_is_idempotent(self):
+        from employees.models import NotificationJob
+        from employees.services.onboarding_notifications import (
+            OnboardingNotificationService,
+        )
+
+        self.task.assigned_to = self.employee_user
+        self.task.save(update_fields=["assigned_to"])
+
+        first_result = OnboardingNotificationService.notify_task_assigned(
+            task_id=self.task.pk,
+        )
+        second_result = OnboardingNotificationService.notify_task_assigned(
+            task_id=self.task.pk,
+        )
+
+        self.assertTrue(first_result)
+        self.assertTrue(second_result)
+        self.assertEqual(
+            NotificationJob.objects.filter(
+                notification_type=NotificationJob.NotificationType.TASK_ASSIGNED,
+            ).count(),
+            1,
+        )
+
+    def test_assignment_service_creates_notification_job(self):
+        from employees.models import NotificationJob
         from employees.services.task_assignment import TaskAssignmentService
 
-        with patch(
-            "employees.services.onboarding_notifications.send_mail"
-        ) as mock_send_mail:
-            with self.captureOnCommitCallbacks(execute=True):
-                TaskAssignmentService.assign_task(
-                    task_id=self.task.pk,
-                    assigned_to_id=self.employee_user.pk,
-                    actor=self.admin,
-                )
-
-        mock_send_mail.assert_called_once()
-        self.assertEqual(
-            mock_send_mail.call_args.kwargs["recipient_list"],
-            [self.employee_user.email],
+        TaskAssignmentService.assign_task(
+            task_id=self.task.pk,
+            assigned_to_id=self.employee_user.pk,
+            actor=self.admin,
         )
 
-    def test_workflow_engine_triggers_completion_notification(self):
-        from unittest.mock import patch
+        job = NotificationJob.objects.get(
+            notification_type=NotificationJob.NotificationType.TASK_ASSIGNED,
+        )
 
-        from employees.models import OnboardingTask
+        self.assertEqual(
+            job.payload["recipient_user_id"],
+            str(self.employee_user.pk),
+        )
+
+    def test_workflow_engine_creates_completion_notification_job(self):
+        from employees.models import NotificationJob, OnboardingTask
         from employees.services.workflow_engine import WorkflowEngine
 
-        with patch(
-            "employees.services.onboarding_notifications.send_mail"
-        ) as mock_send_mail:
-            with self.captureOnCommitCallbacks(execute=True):
-                WorkflowEngine.transition_task(
-                    task_id=self.task.pk,
-                    target_status=OnboardingTask.Status.IN_PROGRESS,
-                    actor=self.admin,
-                )
-                WorkflowEngine.transition_task(
-                    task_id=self.task.pk,
-                    target_status=OnboardingTask.Status.COMPLETED,
-                    actor=self.admin,
-                )
+        WorkflowEngine.transition_task(
+            task_id=self.task.pk,
+            target_status=OnboardingTask.Status.IN_PROGRESS,
+            actor=self.admin,
+        )
+        WorkflowEngine.transition_task(
+            task_id=self.task.pk,
+            target_status=OnboardingTask.Status.COMPLETED,
+            actor=self.admin,
+        )
 
-        mock_send_mail.assert_called_once()
+        job = NotificationJob.objects.get(
+            notification_type=NotificationJob.NotificationType.TASK_COMPLETED,
+        )
+
         self.assertEqual(
-            mock_send_mail.call_args.kwargs["recipient_list"],
-            [self.admin.email],
+            job.payload["recipient_user_id"],
+            str(self.admin.pk),
+        )
+        self.assertEqual(job.status, NotificationJob.Status.PENDING)
+
+    def _create_notification_document(
+        self,
+        *,
+        status,
+        expires_at,
+        storage_suffix,
+    ):
+        from employees.models import HRDocument
+
+        return HRDocument.objects.create(
+            employee=self.task.journey.employee,
+            title=f"Notification document {storage_suffix}",
+            document_type=HRDocument.DocumentType.EMPLOYMENT_CONTRACT,
+            original_filename=f"{storage_suffix}.pdf",
+            storage_key=f"hr-documents/notification/{storage_suffix}.pdf",
+            mime_type="application/pdf",
+            size_bytes=1024,
+            uploaded_by=self.admin,
+            status=status,
+            expires_at=expires_at,
+        )
+
+    def test_overdue_task_notification_is_created_idempotently(self):
+        from datetime import timedelta
+
+        from django.utils import timezone
+        from employees.models import NotificationJob
+        from employees.services.onboarding_notifications import (
+            OnboardingNotificationService,
+        )
+
+        self.task.assigned_to = self.employee_user
+        self.task.due_date = timezone.localdate() - timedelta(days=1)
+        self.task.save(update_fields=["assigned_to", "due_date"])
+
+        first_count = (
+            OnboardingNotificationService
+            .enqueue_overdue_task_notifications()
+        )
+        second_count = (
+            OnboardingNotificationService
+            .enqueue_overdue_task_notifications()
+        )
+
+        self.assertEqual(first_count, 1)
+        self.assertEqual(second_count, 0)
+
+        job = NotificationJob.objects.get(
+            notification_type=NotificationJob.NotificationType.TASK_OVERDUE,
+        )
+        self.assertEqual(job.status, NotificationJob.Status.PENDING)
+        self.assertEqual(job.payload["task_id"], str(self.task.pk))
+        self.assertEqual(
+            job.payload["recipient_user_id"],
+            str(self.employee_user.pk),
+        )
+        self.assertNotIn(self.employee_user.email, str(job.payload))
+
+
+    def test_reassigned_overdue_task_creates_notification_for_new_assignee(self):
+        from datetime import timedelta
+
+        from django.contrib.auth import get_user_model
+        from django.utils import timezone
+        from employees.models import NotificationJob
+        from employees.services.onboarding_notifications import (
+            OnboardingNotificationService,
+        )
+
+        User = get_user_model()
+
+        new_assignee = User.objects.create_user(
+            email="notification-new-assignee@example.com",
+            name="New Notification Assignee",
+            password="TestPassword123!",
+            role="EMPLOYEE",
+            is_active=True,
+        )
+
+        self.task.assigned_to = self.employee_user
+        self.task.due_date = timezone.localdate() - timedelta(days=1)
+        self.task.save(update_fields=["assigned_to", "due_date"])
+
+        first_count = (
+            OnboardingNotificationService
+            .enqueue_overdue_task_notifications()
+        )
+
+        self.task.assigned_to = new_assignee
+        self.task.save(update_fields=["assigned_to"])
+
+        second_count = (
+            OnboardingNotificationService
+            .enqueue_overdue_task_notifications()
+        )
+
+        self.assertEqual(first_count, 1)
+        self.assertEqual(second_count, 1)
+
+        jobs = NotificationJob.objects.filter(
+            notification_type=NotificationJob.NotificationType.TASK_OVERDUE,
+        ).order_by("created_at")
+
+        self.assertEqual(jobs.count(), 2)
+
+        recipients = set(
+            jobs.values_list("payload__recipient_user_id", flat=True)
+        )
+
+        self.assertEqual(
+            recipients,
+            {
+                str(self.employee_user.pk),
+                str(new_assignee.pk),
+            },
+        )
+
+
+    def test_completed_task_does_not_receive_overdue_notification(self):
+        from datetime import timedelta
+
+        from django.utils import timezone
+        from employees.models import NotificationJob, OnboardingTask
+        from employees.services.onboarding_notifications import (
+            OnboardingNotificationService,
+        )
+
+        self.task.assigned_to = self.employee_user
+        self.task.due_date = timezone.localdate() - timedelta(days=1)
+        self.task.status = OnboardingTask.Status.COMPLETED
+        self.task.save(
+            update_fields=["assigned_to", "due_date", "status"]
+        )
+
+        count = (
+            OnboardingNotificationService
+            .enqueue_overdue_task_notifications()
+        )
+
+        self.assertEqual(count, 0)
+        self.assertFalse(
+            NotificationJob.objects.filter(
+                notification_type=NotificationJob.NotificationType.TASK_OVERDUE,
+            ).exists()
+        )
+
+    def test_unassigned_overdue_task_does_not_create_notification(self):
+        from datetime import timedelta
+
+        from django.utils import timezone
+        from employees.models import NotificationJob
+        from employees.services.onboarding_notifications import (
+            OnboardingNotificationService,
+        )
+
+        self.task.due_date = timezone.localdate() - timedelta(days=1)
+        self.task.save(update_fields=["due_date"])
+
+        count = (
+            OnboardingNotificationService
+            .enqueue_overdue_task_notifications()
+        )
+
+        self.assertEqual(count, 0)
+        self.assertFalse(
+            NotificationJob.objects.filter(
+                notification_type=NotificationJob.NotificationType.TASK_OVERDUE,
+            ).exists()
+        )
+
+    def test_expiring_verified_document_notification_is_idempotent(self):
+        from datetime import timedelta
+
+        from django.utils import timezone
+        from employees.models import HRDocument, NotificationJob
+        from employees.services.onboarding_notifications import (
+            OnboardingNotificationService,
+        )
+
+        document = self._create_notification_document(
+            status=HRDocument.Status.VERIFIED,
+            expires_at=timezone.localdate() + timedelta(days=10),
+            storage_suffix="verified-expiring",
+        )
+
+        first_count = (
+            OnboardingNotificationService
+            .enqueue_expiring_document_notifications()
+        )
+        second_count = (
+            OnboardingNotificationService
+            .enqueue_expiring_document_notifications()
+        )
+
+        self.assertEqual(first_count, 1)
+        self.assertEqual(second_count, 0)
+
+        job = NotificationJob.objects.get(
+            notification_type=(
+                NotificationJob.NotificationType.DOCUMENT_EXPIRING
+            ),
+        )
+        self.assertEqual(job.status, NotificationJob.Status.PENDING)
+        self.assertEqual(job.payload["document_id"], str(document.pk))
+        self.assertEqual(
+            job.payload["recipient_user_id"],
+            str(self.employee_user.pk),
+        )
+        self.assertNotIn(self.employee_user.email, str(job.payload))
+
+    def test_ineligible_documents_do_not_create_expiration_notifications(self):
+        from datetime import timedelta
+
+        from django.utils import timezone
+        from employees.models import HRDocument, NotificationJob
+        from employees.services.onboarding_notifications import (
+            OnboardingNotificationService,
+        )
+
+        today = timezone.localdate()
+
+        self._create_notification_document(
+            status=HRDocument.Status.PENDING_REVIEW,
+            expires_at=today + timedelta(days=10),
+            storage_suffix="pending-review",
+        )
+        self._create_notification_document(
+            status=HRDocument.Status.VERIFIED,
+            expires_at=today + timedelta(days=31),
+            storage_suffix="outside-window",
+        )
+        self._create_notification_document(
+            status=HRDocument.Status.VERIFIED,
+            expires_at=today,
+            storage_suffix="expires-today",
+        )
+
+        count = (
+            OnboardingNotificationService
+            .enqueue_expiring_document_notifications()
+        )
+
+        self.assertEqual(count, 0)
+        self.assertFalse(
+            NotificationJob.objects.filter(
+                notification_type=(
+                    NotificationJob.NotificationType.DOCUMENT_EXPIRING
+                ),
+            ).exists()
+        )
+
+    def test_cancelled_task_does_not_receive_overdue_notification(self):
+        from datetime import timedelta
+
+        from django.utils import timezone
+        from employees.models import NotificationJob, OnboardingTask
+        from employees.services.onboarding_notifications import (
+            OnboardingNotificationService,
+        )
+
+        self.task.assigned_to = self.employee_user
+        self.task.due_date = timezone.localdate() - timedelta(days=1)
+        self.task.status = OnboardingTask.Status.CANCELLED
+        self.task.save(
+            update_fields=["assigned_to", "due_date", "status"]
+        )
+
+        count = (
+            OnboardingNotificationService
+            .enqueue_overdue_task_notifications()
+        )
+
+        self.assertEqual(count, 0)
+        self.assertFalse(
+            NotificationJob.objects.filter(
+                notification_type=NotificationJob.NotificationType.TASK_OVERDUE,
+            ).exists()
+        )
+
+    def test_inactive_assignee_does_not_receive_overdue_notification(self):
+        from datetime import timedelta
+
+        from django.utils import timezone
+        from employees.models import NotificationJob
+        from employees.services.onboarding_notifications import (
+            OnboardingNotificationService,
+        )
+
+        self.employee_user.is_active = False
+        self.employee_user.save(update_fields=["is_active"])
+
+        self.task.assigned_to = self.employee_user
+        self.task.due_date = timezone.localdate() - timedelta(days=1)
+        self.task.save(update_fields=["assigned_to", "due_date"])
+
+        count = (
+            OnboardingNotificationService
+            .enqueue_overdue_task_notifications()
+        )
+
+        self.assertEqual(count, 0)
+        self.assertFalse(
+            NotificationJob.objects.filter(
+                notification_type=NotificationJob.NotificationType.TASK_OVERDUE,
+            ).exists()
         )
 
 class OnboardingPermissionServiceTests(TestCase):
@@ -15790,3 +16070,792 @@ class RecruitmentMetricsServiceTests(TestCase):
             "days must be greater than or equal to 1.",
         ):
             self.RecruitmentMetricsService.get_dashboard(days=0)
+
+class NotificationJobModelTests(TestCase):
+    """Tests for durable notification jobs."""
+
+    def test_create_notification_job_with_defaults(self):
+        job = NotificationJob.objects.create(
+            notification_type=NotificationJob.NotificationType.TASK_ASSIGNED,
+            idempotency_key="task-assigned-123",
+            payload={"task_id": "123"},
+        )
+
+        self.assertIsNotNone(job.id)
+        self.assertEqual(job.status, NotificationJob.Status.PENDING)
+        self.assertEqual(job.attempts, 0)
+        self.assertEqual(job.max_attempts, 5)
+        self.assertIsNotNone(job.next_attempt_at)
+        self.assertEqual(job.payload, {"task_id": "123"})
+        self.assertEqual(job.last_error, "")
+
+    def test_idempotency_key_must_be_unique(self):
+        NotificationJob.objects.create(
+            notification_type=NotificationJob.NotificationType.TASK_ASSIGNED,
+            idempotency_key="duplicate-event-123",
+        )
+
+        with self.assertRaises(IntegrityError):
+            with transaction.atomic():
+                NotificationJob.objects.create(
+                    notification_type=NotificationJob.NotificationType.TASK_ASSIGNED,
+                    idempotency_key="duplicate-event-123",
+                )
+
+    def test_max_attempts_must_be_positive(self):
+        with self.assertRaises(IntegrityError):
+            with transaction.atomic():
+                NotificationJob.objects.create(
+                    notification_type=NotificationJob.NotificationType.TASK_ASSIGNED,
+                    idempotency_key="invalid-max-attempts",
+                    max_attempts=0,
+                )
+
+    def test_attempts_cannot_exceed_max_attempts(self):
+        with self.assertRaises(IntegrityError):
+            with transaction.atomic():
+                NotificationJob.objects.create(
+                    notification_type=NotificationJob.NotificationType.TASK_ASSIGNED,
+                    idempotency_key="invalid-attempt-count",
+                    attempts=6,
+                    max_attempts=5,
+                )
+
+    def test_notification_job_can_transition_to_success(self):
+        job = NotificationJob.objects.create(
+            notification_type=NotificationJob.NotificationType.TASK_ASSIGNED,
+            idempotency_key="successful-notification",
+        )
+
+        job.status = NotificationJob.Status.SUCCESS
+        job.save(update_fields=["status", "updated_at"])
+
+        job.refresh_from_db()
+        self.assertEqual(job.status, NotificationJob.Status.SUCCESS)
+
+    def test_notification_job_can_store_correlation_id(self):
+        correlation_id = uuid.uuid4()
+
+        job = NotificationJob.objects.create(
+            notification_type=NotificationJob.NotificationType.TASK_OVERDUE,
+            idempotency_key="overdue-task-123",
+            correlation_id=correlation_id,
+        )
+
+        self.assertEqual(job.correlation_id, correlation_id)
+
+class NotificationWorkerTests(TestCase):
+    """Tests for asynchronous notification job processing."""
+
+    def setUp(self):
+        from employees.services.onboarding_notifications import (
+            OnboardingNotificationService,
+        )
+
+        self.admin = User.objects.create_user(
+            email="worker-admin@example.com",
+            name="Worker Admin",
+            password="TestPassword123!",
+            role="HR_ADMIN",
+            is_active=True,
+        )
+
+        self.employee_user = User.objects.create_user(
+            email="worker-employee@example.com",
+            name="Worker Employee",
+            password="TestPassword123!",
+            role="EMPLOYEE",
+            is_active=True,
+        )
+
+        department = Department.objects.create(
+            name="Worker Department",
+            code="WORKER",
+        )
+        position = Position.objects.create(
+            title="Worker Specialist",
+            department=department,
+        )
+        employee = EmployeeProfile.objects.create(
+            user=self.employee_user,
+            employee_id="WORKER-001",
+            department=department,
+            position=position,
+            hire_date=date.today(),
+        )
+        self.profile = employee
+        from employees.models import (
+            OnboardingActivityTemplate,
+            OnboardingPhase,
+            OnboardingTemplate,
+        )
+        from employees.services.onboarding import OnboardingService
+
+        template = OnboardingTemplate.objects.create(
+            name="Worker test template",
+            description="Worker test",
+            version=1,
+            created_by=self.admin,
+        )
+        phase = OnboardingPhase.objects.create(
+            template=template,
+            name="Worker phase",
+            description="Worker phase",
+            order=1,
+        )
+        OnboardingActivityTemplate.objects.create(
+            phase=phase,
+            name="Worker task",
+            description="Worker task",
+            order=1,
+            is_required=True,
+            default_due_days=3,
+        )
+
+        OnboardingService.publish_template(template.pk)
+        self.journey = OnboardingService.create_journey(
+            employee_id=employee.pk,
+            template_id=template.pk,
+            created_by=self.admin,
+        )
+        self.task = self.journey.tasks.get()
+        self.task.assigned_to = self.employee_user
+        self.task.save(update_fields=["assigned_to"])
+
+        OnboardingNotificationService.notify_task_assigned(
+            task_id=self.task.pk,
+        )
+        self.job = NotificationJob.objects.get(
+            notification_type=NotificationJob.NotificationType.TASK_ASSIGNED,
+        )
+
+    @patch("employees.services.notification_worker.send_mail")
+    def test_worker_sends_assignment_notification(self, mock_send_mail):
+        from employees.services.notification_worker import (
+            NotificationWorker,
+        )
+
+        mock_send_mail.return_value = 1
+
+        result = NotificationWorker.process_batch(batch_size=1)
+
+        self.job.refresh_from_db()
+
+        self.assertEqual(result["processed"], 1)
+        self.assertEqual(self.job.status, NotificationJob.Status.SUCCESS)
+        mock_send_mail.assert_called_once()
+
+    @patch("employees.services.notification_worker.send_mail")
+    def test_reassigned_task_does_not_send_to_old_recipient(
+        self,
+        mock_send_mail,
+    ):
+        from employees.services.notification_worker import (
+            NotificationWorker,
+        )
+
+        another_user = User.objects.create_user(
+            email="worker-another@example.com",
+            name="Another Employee",
+            password="TestPassword123!",
+            role="EMPLOYEE",
+            is_active=True,
+        )
+
+        self.task.assigned_to = another_user
+        self.task.save(update_fields=["assigned_to"])
+
+        result = NotificationWorker.process_batch(batch_size=1)
+
+        self.job.refresh_from_db()
+
+        self.assertEqual(result["processed"], 1)
+        self.assertEqual(self.job.status, NotificationJob.Status.SUCCESS)
+        mock_send_mail.assert_not_called()
+
+    @patch("employees.services.notification_worker.send_mail")
+    def test_email_failure_schedules_retry(self, mock_send_mail):
+        from employees.services.notification_worker import (
+            NotificationWorker,
+        )
+
+        mock_send_mail.side_effect = RuntimeError("SMTP unavailable")
+
+        before = timezone.now()
+        result = NotificationWorker.process_batch(batch_size=1)
+
+        self.job.refresh_from_db()
+
+        self.assertEqual(result["processed"], 1)
+        self.assertEqual(self.job.status, NotificationJob.Status.PENDING)
+        self.assertEqual(self.job.attempts, 1)
+        self.assertEqual(self.job.last_error, "RuntimeError")
+        self.assertGreater(self.job.next_attempt_at, before)
+
+    @patch("employees.services.notification_worker.send_mail")
+    def test_terminal_failure_creates_audit_event(self, mock_send_mail):
+        from employees.services.notification_worker import (
+            NotificationWorker,
+        )
+        from employees.models import WorkflowExecutionLog
+
+        self.job.attempts = self.job.max_attempts - 1
+        self.job.save(update_fields=["attempts"])
+
+        mock_send_mail.side_effect = RuntimeError("SMTP unavailable")
+
+        result = NotificationWorker.process_batch(batch_size=1)
+
+        self.job.refresh_from_db()
+
+        self.assertEqual(result["processed"], 1)
+        self.assertEqual(self.job.status, NotificationJob.Status.FAILED)
+
+        event = WorkflowExecutionLog.objects.get(
+            event_type="NOTIFICATION_FAILED",
+        )
+        self.assertEqual(
+            event.correlation_id,
+            self.job.correlation_id,
+        )
+        self.assertEqual(
+            event.outcome,
+            WorkflowExecutionLog.Outcome.FAILURE,
+        )
+        self.assertNotIn(
+            self.employee_user.email,
+            str(event.details),
+        )
+        self.assertNotIn(
+            "Worker task",
+            str(event.details),
+        )
+
+    def test_stale_processing_job_is_recovered(self):
+        from employees.services.notification_worker import (
+            NotificationWorker,
+        )
+
+        self.job.status = NotificationJob.Status.PROCESSING
+        self.job.attempts = 1
+        self.job.save(update_fields=["status", "attempts"])
+
+        NotificationJob.objects.filter(
+            pk=self.job.pk,
+        ).update(
+            updated_at=timezone.now() - timedelta(minutes=11),
+        )
+        claimed_job = NotificationWorker._claim_next_job()
+
+        self.job.refresh_from_db()
+
+        self.assertIsNotNone(claimed_job)
+        self.assertEqual(claimed_job.pk, self.job.pk)
+        self.assertEqual(
+            self.job.status,
+            NotificationJob.Status.PROCESSING,
+        )
+        self.assertEqual(self.job.attempts, 2)
+
+    def test_stale_processing_job_exhausted_attempts_creates_audit_event(self):
+        from employees.services.notification_worker import (
+            NotificationWorker,
+        )
+        from employees.models import WorkflowExecutionLog
+
+        self.job.status = NotificationJob.Status.PROCESSING
+        self.job.attempts = self.job.max_attempts
+        self.job.save(update_fields=["status", "attempts"])
+
+        NotificationJob.objects.filter(
+            pk=self.job.pk,
+        ).update(
+            updated_at=timezone.now() - timedelta(minutes=11),
+        )
+
+        claimed_job = NotificationWorker._claim_next_job()
+
+        self.job.refresh_from_db()
+
+        self.assertIsNone(claimed_job)
+        self.assertEqual(
+            self.job.status,
+            NotificationJob.Status.FAILED,
+        )
+        self.assertEqual(
+            self.job.attempts,
+            self.job.max_attempts,
+        )
+
+        event = WorkflowExecutionLog.objects.get(
+            event_type="NOTIFICATION_FAILED",
+        )
+        self.assertEqual(
+            event.correlation_id,
+            self.job.correlation_id,
+        )
+        self.assertEqual(
+            event.outcome,
+            WorkflowExecutionLog.Outcome.FAILURE,
+        )
+        self.assertEqual(
+            event.details["reason"],
+            "WORKER_LEASE_EXPIRED",
+        )
+        self.assertEqual(
+            event.details["notification_type"],
+            self.job.notification_type,
+        )
+
+
+    @patch("employees.services.notification_worker.send_mail")
+    def test_inactive_recipient_does_not_receive_notification(
+        self,
+        mock_send_mail,
+    ):
+        from employees.services.notification_worker import (
+            NotificationWorker,
+        )
+
+        self.employee_user.is_active = False
+        self.employee_user.save(update_fields=["is_active"])
+
+        result = NotificationWorker.process_batch(batch_size=1)
+
+        self.job.refresh_from_db()
+
+        self.assertEqual(result["processed"], 1)
+        self.assertEqual(self.job.status, NotificationJob.Status.SUCCESS)
+        mock_send_mail.assert_not_called()
+
+    @patch("employees.services.notification_worker.send_mail")
+    def test_task_completed_notification_is_sent_to_journey_creator(
+        self,
+        mock_send_mail,
+    ):
+        from employees.services.notification_worker import (
+            NotificationWorker,
+        )
+        from employees.models import OnboardingTask
+
+        self.task.status = OnboardingTask.Status.COMPLETED
+        self.task.save(update_fields=["status"])
+
+        self.job.notification_type = (
+            NotificationJob.NotificationType.TASK_COMPLETED
+        )
+        self.job.payload = {
+            "task_id": str(self.task.pk),
+            "recipient_user_id": str(self.admin.pk),
+        }
+        self.job.save(update_fields=["notification_type", "payload"])
+
+        mock_send_mail.return_value = 1
+
+        result = NotificationWorker.process_batch(batch_size=1)
+
+        self.job.refresh_from_db()
+
+        self.assertEqual(result["processed"], 1)
+        self.assertEqual(self.job.status, NotificationJob.Status.SUCCESS)
+        mock_send_mail.assert_called_once()
+
+        self.assertEqual(
+            mock_send_mail.call_args.kwargs["recipient_list"],
+            [self.admin.email],
+        )
+
+    @patch("employees.services.notification_worker.send_mail")
+    def test_overdue_task_notification_is_sent(self, mock_send_mail):
+        from employees.services.notification_worker import (
+            NotificationWorker,
+        )
+
+        self.task.due_date = timezone.localdate() - timedelta(days=1)
+        self.task.save(update_fields=["due_date"])
+
+        self.job.notification_type = (
+            NotificationJob.NotificationType.TASK_OVERDUE
+        )
+        self.job.payload = {
+            "task_id": str(self.task.pk),
+            "recipient_user_id": str(self.employee_user.pk),
+        }
+        self.job.save(update_fields=["notification_type", "payload"])
+
+        mock_send_mail.return_value = 1
+
+        result = NotificationWorker.process_batch(batch_size=1)
+
+        self.job.refresh_from_db()
+
+        self.assertEqual(result["processed"], 1)
+        self.assertEqual(self.job.status, NotificationJob.Status.SUCCESS)
+        mock_send_mail.assert_called_once()
+
+    @patch("employees.services.notification_worker.send_mail")
+    def test_expiring_verified_document_notification_is_sent(
+        self,
+        mock_send_mail,
+    ):
+        from employees.services.notification_worker import (
+            NotificationWorker,
+        )
+
+        document = HRDocument.objects.create(
+            employee=self.profile,
+            title="Worker test document",
+            document_type=HRDocument.DocumentType.EMPLOYMENT_CONTRACT,
+            original_filename="worker-contract.pdf",
+            storage_key=(
+                f"hr-documents/notification-worker/{self.job.pk}/contract.pdf"
+            ),
+            mime_type="application/pdf",
+            size_bytes=1024,
+            uploaded_by=self.admin,
+            status=HRDocument.Status.VERIFIED,
+            expires_at=timezone.localdate() + timedelta(days=10),
+        )
+
+        self.job.notification_type = (
+            NotificationJob.NotificationType.DOCUMENT_EXPIRING
+        )
+        self.job.payload = {
+            "document_id": str(document.pk),
+            "recipient_user_id": str(self.employee_user.pk),
+        }
+        self.job.save(update_fields=["notification_type", "payload"])
+
+        mock_send_mail.return_value = 1
+
+        result = NotificationWorker.process_batch(batch_size=1)
+
+        self.job.refresh_from_db()
+
+        self.assertEqual(result["processed"], 1)
+        self.assertEqual(self.job.status, NotificationJob.Status.SUCCESS)
+        mock_send_mail.assert_called_once()
+
+    @patch("employees.services.notification_worker.send_mail")
+    def test_non_verified_document_does_not_trigger_email(
+        self,
+        mock_send_mail,
+    ):
+        from employees.services.notification_worker import (
+            NotificationWorker,
+        )
+
+        document = HRDocument.objects.create(
+            employee=self.profile,
+            title="Archived worker document",
+            document_type=HRDocument.DocumentType.EMPLOYMENT_CONTRACT,
+            original_filename="archived-contract.pdf",
+            storage_key=(
+                f"hr-documents/notification-worker/{self.job.pk}/archived.pdf"
+            ),
+            mime_type="application/pdf",
+            size_bytes=1024,
+            uploaded_by=self.admin,
+            status=HRDocument.Status.ARCHIVED,
+            expires_at=timezone.localdate() + timedelta(days=10),
+        )
+
+        self.job.notification_type = (
+            NotificationJob.NotificationType.DOCUMENT_EXPIRING
+        )
+        self.job.payload = {
+            "document_id": str(document.pk),
+            "recipient_user_id": str(self.employee_user.pk),
+        }
+        self.job.save(update_fields=["notification_type", "payload"])
+
+        result = NotificationWorker.process_batch(batch_size=1)
+
+        self.job.refresh_from_db()
+
+        self.assertEqual(result["processed"], 1)
+        self.assertEqual(self.job.status, NotificationJob.Status.SUCCESS)
+        mock_send_mail.assert_not_called()
+
+    @patch("employees.services.notification_worker.send_mail")
+    def test_retry_failure_is_reported_as_retry_scheduled(
+        self,
+        mock_send_mail,
+    ):
+        from employees.services.notification_worker import (
+            NotificationWorker,
+        )
+        mock_send_mail.side_effect = RuntimeError("SMTP unavailable")
+
+        result = NotificationWorker.process_batch(batch_size=1)
+
+        self.assertEqual(
+            result["results"],
+            ["RETRY_SCHEDULED"],
+        )
+
+    @patch("employees.services.notification_worker.send_mail")
+    def test_terminal_failure_is_reported_as_failed(
+        self,
+        mock_send_mail,
+    ):
+        from employees.services.notification_worker import (
+            NotificationWorker,
+        )
+        self.job.attempts = self.job.max_attempts - 1
+        self.job.save(update_fields=["attempts"])
+
+        mock_send_mail.side_effect = RuntimeError("SMTP unavailable")
+
+        result = NotificationWorker.process_batch(batch_size=1)
+
+        self.assertEqual(
+            result["results"],
+            ["FAILED"],
+        )
+
+class ProcessNotificationsCommandTests(TestCase):
+    """Tests for the process_notifications management command."""
+
+    @patch(
+        "employees.management.commands.process_notifications.connection.vendor",
+        "sqlite",
+    )
+    @patch(
+        "employees.management.commands.process_notifications.NotificationWorker.process_batch"
+    )
+    def test_processes_pending_notifications(self, mock_process_batch):
+        """The command processes queued notifications."""
+
+        mock_process_batch.return_value = {
+            "processed": 2,
+            "results": ["SUCCESS", "RETRY_SCHEDULED"],
+        }
+
+        from io import StringIO
+
+        output = StringIO()
+
+        call_command(
+            "process_notifications",
+            batch_size=10,
+            max_batches=3,
+            stdout=output,
+        )
+
+        mock_process_batch.assert_called_once_with(batch_size=10)
+        self.assertIn("processed=2", output.getvalue())
+        self.assertIn("retries_scheduled=1", output.getvalue())
+        self.assertIn("failed=0", output.getvalue())
+
+    @patch(
+        "employees.management.commands.process_notifications.connection.vendor",
+        "sqlite",
+    )
+    @patch(
+        "employees.management.commands.process_notifications.NotificationWorker.process_batch"
+    )
+    def test_processes_multiple_batches_until_queue_is_empty(
+        self,
+        mock_process_batch,
+    ):
+        """The command stops when a batch contains fewer jobs than requested."""
+
+        mock_process_batch.side_effect = [
+            {
+                "processed": 2,
+                "results": ["SUCCESS", "SUCCESS"],
+            },
+            {
+                "processed": 1,
+                "results": ["SUCCESS"],
+            },
+        ]
+
+        call_command(
+            "process_notifications",
+            batch_size=2,
+            max_batches=5,
+        )
+
+        self.assertEqual(mock_process_batch.call_count, 2)
+
+    def test_rejects_invalid_batch_size(self):
+        """A batch size below one must be rejected."""
+
+        with self.assertRaises(CommandError):
+            call_command(
+                "process_notifications",
+                batch_size=0,
+            )
+
+    def test_rejects_invalid_max_batches(self):
+        """A maximum batch count below one must be rejected."""
+
+        with self.assertRaises(CommandError):
+            call_command(
+                "process_notifications",
+                max_batches=0,
+            )
+
+    @patch(
+        "employees.management.commands.process_notifications.connection.vendor",
+        "sqlite",
+    )
+    @patch(
+        "employees.management.commands.process_notifications.NotificationWorker.process_batch"
+    )
+    @patch(
+        "employees.management.commands.process_notifications.OnboardingNotificationService.enqueue_expiring_document_notifications"
+    )
+    @patch(
+        "employees.management.commands.process_notifications.OnboardingNotificationService.enqueue_overdue_task_notifications"
+    )
+    def test_enqueue_daily_creates_both_notification_types(
+        self,
+        mock_overdue,
+        mock_expiring,
+        mock_process_batch,
+    ):
+        """Daily mode invokes both notification producers."""
+
+        mock_overdue.return_value = 3
+        mock_expiring.return_value = 2
+        mock_process_batch.return_value = {
+            "processed": 0,
+            "results": [],
+        }
+
+        from io import StringIO
+
+        output = StringIO()
+
+        call_command(
+            "process_notifications",
+            enqueue_daily=True,
+            stdout=output,
+        )
+
+        mock_overdue.assert_called_once_with()
+        mock_expiring.assert_called_once_with()
+        mock_process_batch.assert_called_once()
+
+        self.assertIn("overdue_tasks=3", output.getvalue())
+        self.assertIn("expiring_documents=2", output.getvalue())
+
+    @patch(
+        "employees.management.commands.process_notifications.connection.vendor",
+        "sqlite",
+    )
+    @patch(
+        "employees.management.commands.process_notifications.NotificationWorker.process_batch"
+    )
+    def test_worker_exception_is_reported_as_command_error(
+        self,
+        mock_process_batch,
+    ):
+        """Unexpected worker errors must fail the management command."""
+
+        mock_process_batch.side_effect = RuntimeError("Internal test error")
+
+        with self.assertRaises(CommandError) as context:
+            call_command("process_notifications")
+
+        self.assertEqual(
+            str(context.exception),
+            "Notification processing failed.",
+        )
+        self.assertNotIn("Internal test error", str(context.exception))
+
+
+    @patch(
+        "employees.management.commands.process_notifications.connection.vendor",
+        "postgresql",
+    )
+    @patch(
+        "employees.management.commands.process_notifications.connection.cursor"
+    )
+    @patch(
+        "employees.management.commands.process_notifications.NotificationWorker.process_batch"
+    )
+    def test_skips_when_advisory_lock_is_unavailable(
+        self,
+        mock_process_batch,
+        mock_cursor,
+    ):
+        """The command skips processing when another worker holds the lock."""
+
+        cursor = mock_cursor.return_value.__enter__.return_value
+        cursor.fetchone.return_value = (False,)
+
+        call_command("process_notifications")
+
+        cursor.execute.assert_called_once_with(
+            "SELECT pg_try_advisory_lock(%s)",
+            [726194003],
+        )
+        mock_process_batch.assert_not_called()
+
+    @patch(
+        "employees.management.commands.process_notifications.connection.vendor",
+        "postgresql",
+    )
+    @patch(
+        "employees.management.commands.process_notifications.connection.cursor"
+    )
+    @patch(
+        "employees.management.commands.process_notifications.NotificationWorker.process_batch"
+    )
+    def test_releases_advisory_lock_after_success(
+        self,
+        mock_process_batch,
+        mock_cursor,
+    ):
+        """The command releases its advisory lock after successful processing."""
+
+        cursor = mock_cursor.return_value.__enter__.return_value
+        cursor.fetchone.return_value = (True,)
+        mock_process_batch.return_value = {
+            "processed": 0,
+            "results": [],
+        }
+
+        call_command("process_notifications")
+
+        cursor.execute.assert_any_call(
+            "SELECT pg_try_advisory_lock(%s)",
+            [726194003],
+        )
+        cursor.execute.assert_any_call(
+            "SELECT pg_advisory_unlock(%s)",
+            [726194003],
+        )
+
+    @patch(
+        "employees.management.commands.process_notifications.connection.vendor",
+        "postgresql",
+    )
+    @patch(
+        "employees.management.commands.process_notifications.connection.cursor"
+    )
+    @patch(
+        "employees.management.commands.process_notifications.NotificationWorker.process_batch"
+    )
+    def test_releases_advisory_lock_after_worker_failure(
+        self,
+        mock_process_batch,
+        mock_cursor,
+    ):
+        """The command releases its advisory lock even after a worker failure."""
+
+        cursor = mock_cursor.return_value.__enter__.return_value
+        cursor.fetchone.return_value = (True,)
+        mock_process_batch.side_effect = RuntimeError("Internal test error")
+
+        with self.assertRaises(CommandError):
+            call_command("process_notifications")
+
+        cursor.execute.assert_any_call(
+            "SELECT pg_advisory_unlock(%s)",
+            [726194003],
+        )
