@@ -18,9 +18,10 @@ RUN apt-get update \
 COPY requirements.lock /app/requirements.lock
 RUN pip install --no-cache-dir --require-hashes -r /app/requirements.lock
 
-# Copier le code Django et le scheduler
+# Copier le code Django et les schedulers
 COPY backend/ /app/
 COPY deploy/retention_scheduler.py /app/retention_scheduler.py
+COPY deploy/notification_scheduler.py /app/notification_scheduler.py
 
 # Créer les répertoires nécessaires
 RUN mkdir -p /app/logs /app/staticfiles

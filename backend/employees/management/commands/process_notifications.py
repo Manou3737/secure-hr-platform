@@ -1,13 +1,16 @@
 """Django command to process queued HR notifications."""
 
 from django.core.management.base import BaseCommand, CommandError
-from django.db import connection
+from django.db import connection, transaction
+from django.utils import timezone
+
+from employees.models import NotificationSchedulerState
 
 from employees.services.notification_worker import NotificationWorker
 from employees.services.onboarding_notifications import (
     OnboardingNotificationService,
 )
-
+from zoneinfo import ZoneInfo
 
 NOTIFICATION_LOCK_ID = 726194003
 
@@ -67,20 +70,52 @@ class Command(BaseCommand):
             expiring_created = 0
 
             if options["enqueue_daily"]:
-                overdue_created = (
-                    OnboardingNotificationService
-                    .enqueue_overdue_task_notifications()
-                )
-                expiring_created = (
-                    OnboardingNotificationService
-                    .enqueue_expiring_document_notifications()
-                )
+                with transaction.atomic():
+                    state, _ = (
+                        NotificationSchedulerState.objects.get_or_create(
+                            name="notification_scheduler",
+                        )
+                    )
 
-                self.stdout.write(
-                    "Daily notifications queued: "
-                    f"overdue_tasks={overdue_created}, "
-                    f"expiring_documents={expiring_created}"
-                )
+                    state = (
+                        NotificationSchedulerState.objects
+                        .select_for_update()
+                        .get(pk=state.pk)
+                    )
+
+                    today = timezone.localdate(
+                        timezone=ZoneInfo("America/New_York"),
+                    )
+
+                    if state.last_daily_enqueue_date == today:
+                        self.stdout.write(
+                            "Daily notifications already queued for "
+                            f"{today.isoformat()}."
+                        )
+                    else:
+                        overdue_created = (
+                            OnboardingNotificationService
+                            .enqueue_overdue_task_notifications()
+                        )
+
+                        expiring_created = (
+                            OnboardingNotificationService
+                            .enqueue_expiring_document_notifications()
+                        )
+
+                        state.last_daily_enqueue_date = today
+                        state.save(
+                            update_fields=[
+                                "last_daily_enqueue_date",
+                                "updated_at",
+                            ]
+                        )
+
+                        self.stdout.write(
+                            "Daily notifications queued: "
+                            f"overdue_tasks={overdue_created}, "
+                            f"expiring_documents={expiring_created}"
+                        )
 
             total_processed = 0
             total_retries = 0

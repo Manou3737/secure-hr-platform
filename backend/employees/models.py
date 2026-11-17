@@ -2382,3 +2382,29 @@ class NotificationJob(models.Model):
 
     def __str__(self):
         return f"{self.notification_type} - {self.status}"
+
+
+class NotificationSchedulerState(models.Model):
+    """Persisted state for the notification scheduler."""
+
+    name = models.CharField(
+        max_length=50,
+        primary_key=True,
+        default="notification_scheduler",
+        editable=False,
+    )
+
+    last_daily_enqueue_date = models.DateField(
+        null=True,
+        blank=True,
+    )
+
+    updated_at = models.DateTimeField(
+        auto_now=True,
+    )
+
+    def __str__(self):
+        return (
+            f"{self.name} - "
+            f"{self.last_daily_enqueue_date or 'Never'}"
+        )

@@ -5,9 +5,11 @@ from cryptography.fernet import Fernet
 from employees.encryption import encrypt_bank_data, decrypt_bank_data
 from accounts.models import User, SecurityEvent, AuditLog
 import uuid
+from zoneinfo import ZoneInfo
+from copy import deepcopy
+
 from rest_framework import status
 from rest_framework.test import APIClient
-from copy import deepcopy
 
 from django.core.cache import cache
 from django.db.models.deletion import ProtectedError
@@ -50,6 +52,7 @@ from .models import (
     DocumentAccessLog,
     DocumentRetentionPolicy,
     NotificationJob,
+    NotificationSchedulerState,
 )
 from unittest.mock import patch
 from employees.antivirus import AntivirusUnavailable, MalwareDetected
@@ -16742,6 +16745,108 @@ class ProcessNotificationsCommandTests(TestCase):
 
         self.assertIn("overdue_tasks=3", output.getvalue())
         self.assertIn("expiring_documents=2", output.getvalue())
+        state = NotificationSchedulerState.objects.get(
+            name="notification_scheduler",
+        )
+
+        self.assertEqual(
+            state.last_daily_enqueue_date,
+            timezone.localdate(
+                timezone=ZoneInfo("America/New_York"),
+            )
+        )
+
+    @patch(
+        "employees.management.commands.process_notifications.connection.vendor",
+        "sqlite",
+    )
+    @patch(
+        "employees.management.commands.process_notifications.NotificationWorker.process_batch"
+    )
+    @patch(
+        "employees.management.commands.process_notifications.OnboardingNotificationService.enqueue_expiring_document_notifications"
+    )
+    @patch(
+        "employees.management.commands.process_notifications.OnboardingNotificationService.enqueue_overdue_task_notifications"
+    )
+    def test_daily_enqueue_is_skipped_when_already_completed_today(
+        self,
+        mock_overdue,
+        mock_expiring,
+        mock_process_batch,
+    ):
+        """Daily producers must not run twice on the same day."""
+
+        today = timezone.localdate(timezone=ZoneInfo("America/New_York"),)
+
+        NotificationSchedulerState.objects.create(
+            name="notification_scheduler",
+            last_daily_enqueue_date=today,
+        )
+
+        mock_process_batch.return_value = {
+            "processed": 0,
+            "results": [],
+        }
+
+        from io import StringIO
+
+        output = StringIO()
+
+        call_command(
+            "process_notifications",
+            enqueue_daily=True,
+            stdout=output,
+        )
+
+        mock_overdue.assert_not_called()
+        mock_expiring.assert_not_called()
+        mock_process_batch.assert_called_once()
+
+        self.assertIn(
+            "Daily notifications already queued for",
+            output.getvalue(),
+        )
+
+    @patch(
+        "employees.management.commands.process_notifications.connection.vendor",
+        "sqlite",
+    )
+    @patch(
+        "employees.management.commands.process_notifications.NotificationWorker.process_batch"
+    )
+    @patch(
+        "employees.management.commands.process_notifications.OnboardingNotificationService.enqueue_expiring_document_notifications"
+    )
+    @patch(
+        "employees.management.commands.process_notifications.OnboardingNotificationService.enqueue_overdue_task_notifications"
+    )
+    def test_daily_enqueue_failure_does_not_persist_date(
+        self,
+        mock_overdue,
+        mock_expiring,
+        mock_process_batch,
+    ):
+        """A failed daily enqueue must not persist a successful date."""
+
+        mock_overdue.return_value = 3
+        mock_expiring.side_effect = RuntimeError("Test enqueue failure")
+
+        with self.assertRaises(CommandError):
+            call_command(
+                "process_notifications",
+                enqueue_daily=True,
+            )
+
+        self.assertFalse(
+            NotificationSchedulerState.objects.filter(
+                name="notification_scheduler",
+            ).exists()
+        )
+
+        mock_overdue.assert_called_once_with()
+        mock_expiring.assert_called_once_with()
+        mock_process_batch.assert_not_called()
 
     @patch(
         "employees.management.commands.process_notifications.connection.vendor",
