@@ -2,6 +2,8 @@ from rest_framework.routers import DefaultRouter
 from django.urls import path
 from .views import (
     EmployeeProfileViewSet,
+    DepartmentViewSet,
+    PositionViewSet,
     LeaveRequestViewSet,
     BankAccountViewSet,
     PerformanceReviewViewSet,
@@ -12,9 +14,17 @@ from .views import (
     DashboardView,
 )
 
-
 router = DefaultRouter()
-
+router.register(
+    "departments",
+    DepartmentViewSet,
+    basename="department",
+)
+router.register(
+    "positions",
+    PositionViewSet,
+    basename="position",
+)
 router.register(
     "bank-accounts",
     BankAccountViewSet,

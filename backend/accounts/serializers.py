@@ -279,12 +279,14 @@ class UserAccountSerializer(serializers.ModelSerializer):
             "id",
             "email",
             "name",
+            "role",
             "email_verified",
             "is_active",
         )
         read_only_fields = (
             "id",
             "email",
+            "role",
             "email_verified",
             "is_active",
         )

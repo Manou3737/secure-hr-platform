@@ -60,12 +60,15 @@ from .models import (
 )
 from .permissions import (
     EmployeeProfilePermission,
+    DepartmentPositionReadPermission,
     LeaveRequestPermission,
     BankAccountPermission,
     PerformanceReviewPermission,
     DocumentAccessLogPermission,
 )
 from .serializers import (
+    DepartmentSerializer,
+    PositionSerializer,
     EmployeeProfileSerializer,
     LeaveRequestSerializer,
     BankAccountSerializer,
@@ -84,6 +87,69 @@ from .serializers import (
 from employees.services.document_access import DocumentAccessService
 from employees.services.dashboard.dashboard_service import DashboardService
 
+
+class DepartmentViewSet(viewsets.ReadOnlyModelViewSet):
+    """Read-only department endpoint with HR role isolation."""
+
+    serializer_class = DepartmentSerializer
+    permission_classes = (DepartmentPositionReadPermission,)
+
+    def get_queryset(self):
+        user = self.request.user
+
+        if user.role in ("SUPER_ADMIN", "HR_ADMIN"):
+            return Department.objects.all().order_by("name")
+
+        if user.role == "HR_MANAGER":
+            try:
+                manager_profile = user.employee_profile
+            except EmployeeProfile.DoesNotExist:
+                raise DRFPermissionDenied(
+                    "An employee profile is required for HR managers."
+                )
+
+            return Department.objects.filter(
+                id=manager_profile.department_id
+            ).order_by("name")
+
+        return Department.objects.none()
+
+
+class PositionViewSet(viewsets.ReadOnlyModelViewSet):
+    """Read-only position endpoint with HR role isolation."""
+
+    serializer_class = PositionSerializer
+    permission_classes = (DepartmentPositionReadPermission,)
+
+    def get_queryset(self):
+        user = self.request.user
+
+        if user.role in ("SUPER_ADMIN", "HR_ADMIN"):
+            queryset = Position.objects.all()
+        elif user.role == "HR_MANAGER":
+            try:
+                manager_profile = user.employee_profile
+            except EmployeeProfile.DoesNotExist:
+                raise DRFPermissionDenied(
+                    "An employee profile is required for HR managers."
+                )
+
+            queryset = Position.objects.filter(
+                department_id=manager_profile.department_id
+            )
+        else:
+            return Position.objects.none()
+
+        department_id = self.request.query_params.get("department")
+        if department_id:
+            queryset = queryset.filter(
+                department_id=department_id
+            )
+
+        return queryset.select_related(
+            "department"
+        ).order_by("title")
+
 class EmployeeProfileViewSet(viewsets.ModelViewSet):
     """API endpoint for managing employee profiles."""
 
@@ -94,7 +160,14 @@ class EmployeeProfileViewSet(viewsets.ModelViewSet):
 
     filter_backends = (
         DjangoFilterBackend,
+        SearchFilter,
         OrderingFilter,
+    )
+
+    search_fields = (
+        "employee_id",
+        "department__name",
+        "position__title",
     )
 
     filterset_fields = (
@@ -180,19 +253,30 @@ class EmployeeProfileViewSet(viewsets.ModelViewSet):
         instance.delete()
 
     def get_queryset(self):
-        """Restrict employee list results to the authenticated user."""
+        """Restrict employee profiles according to the user's role."""
 
         user = self.request.user
-
         queryset = EmployeeProfile.objects.all()
 
-        if (
-            user.is_authenticated
-            and user.role == "EMPLOYEE"
-            and self.action == "list"
-        ):
+        if not user.is_authenticated:
+            return queryset.none()
+
+        if user.role == "EMPLOYEE" and self.action == "list":
             queryset = queryset.filter(user=user)
 
+        elif user.role == "HR_MANAGER":
+            try:
+                manager_profile = user.employee_profile
+            except EmployeeProfile.DoesNotExist:
+                raise DRFPermissionDenied(
+                    "An employee profile is required for HR managers."
+                )
+
+            queryset = queryset.filter(
+                department_id=manager_profile.department_id
+            )
+
+        # HR_ADMIN and SUPER_ADMIN retain global access.
         return queryset.order_by("-created_at", "-id")
 
 class LeaveRequestViewSet(viewsets.ModelViewSet):

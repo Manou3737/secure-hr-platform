@@ -80,6 +80,34 @@ class EmployeeProfilePermission(BasePermission):
 
         return False
 
+class DepartmentPositionReadPermission(BasePermission):
+    """
+    Allow read-only access to departments and positions
+    for authorized HR roles.
+    """
+
+
+class DepartmentPositionReadPermission(BasePermission):
+    """
+    Allow read-only access to departments and positions
+    for authorized HR roles.
+    """
+
+    def has_permission(self, request, view):
+        user = request.user
+
+        if not user or not user.is_authenticated:
+            return False
+
+        if user.role not in (
+            "SUPER_ADMIN",
+            "HR_ADMIN",
+            "HR_MANAGER",
+        ):
+            return False
+
+        return True
+
 
 class LeaveRequestPermission(BasePermission):
     """
@@ -185,7 +213,6 @@ class LeaveRequestPermission(BasePermission):
             )
 
         return False
-
 
 class BankAccountPermission(BasePermission):
     """Control access to employee bank account data."""

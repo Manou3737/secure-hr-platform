@@ -136,6 +136,226 @@ class EmployeeProfileModelTests(TestCase):
             )
 
 
+class DepartmentPositionRBACAPITests(TestCase):
+    """Tests for department and position read-only API permissions."""
+
+    def setUp(self):
+        self.client = APIClient()
+
+        self.super_admin = User.objects.create_user(
+            email="department.super@example.com",
+            name="Super Admin",
+            password="StrongPassword123!",
+            role="SUPER_ADMIN",
+            is_staff=True,
+            is_superuser=True,
+        )
+
+        self.hr_admin = User.objects.create_user(
+            email="department.hradmin@example.com",
+            name="HR Admin",
+            password="StrongPassword123!",
+            role="HR_ADMIN",
+        )
+
+        self.hr_manager = User.objects.create_user(
+            email="department.manager@example.com",
+            name="HR Manager",
+            password="StrongPassword123!",
+            role="HR_MANAGER",
+        )
+
+        self.employee = User.objects.create_user(
+            email="department.employee@example.com",
+            name="Employee",
+            password="StrongPassword123!",
+            role="EMPLOYEE",
+        )
+
+        self.manager_without_profile = User.objects.create_user(
+            email="department.manager.noprofile@example.com",
+            name="Manager Without Profile",
+            password="StrongPassword123!",
+            role="HR_MANAGER",
+        )
+
+        self.engineering = Department.objects.create(
+            name="Engineering",
+            code="ENG",
+        )
+        self.hr = Department.objects.create(
+            name="Human Resources",
+            code="HR",
+        )
+        self.finance = Department.objects.create(
+            name="Finance",
+            code="FIN",
+        )
+
+        self.engineering_position = Position.objects.create(
+            title="Software Engineer",
+            department=self.engineering,
+        )
+        self.backend_position = Position.objects.create(
+            title="Backend Developer",
+            department=self.engineering,
+        )
+        self.hr_position = Position.objects.create(
+            title="HR Specialist",
+            department=self.hr,
+        )
+        self.finance_position = Position.objects.create(
+            title="Financial Analyst",
+            department=self.finance,
+        )
+
+        EmployeeProfile.objects.create(
+            user=self.hr_manager,
+            employee_id="DEPT-MGR-001",
+            department=self.engineering,
+            position=self.backend_position,
+            hire_date=date(2025, 1, 1),
+        )
+
+        self.departments_url = "/api/v1/employees/departments/"
+        self.positions_url = "/api/v1/employees/positions/"
+
+    def authenticate(self, user):
+        self.client.force_authenticate(user=user)
+
+    def get_results(self, response):
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_200_OK,
+        )
+        return response.data["results"]
+
+    def test_unauthenticated_user_cannot_list_departments_or_positions(self):
+        for url in (self.departments_url, self.positions_url):
+            with self.subTest(url=url):
+                response = self.client.get(url)
+                self.assertEqual(
+                    response.status_code,
+                    status.HTTP_401_UNAUTHORIZED,
+                )
+
+    def test_super_admin_has_global_department_and_position_access(self):
+        self.authenticate(self.super_admin)
+
+        departments = self.get_results(
+            self.client.get(self.departments_url)
+        )
+        positions = self.get_results(
+            self.client.get(self.positions_url)
+        )
+
+        self.assertEqual(len(departments), 3)
+        self.assertEqual(len(positions), 4)
+
+    def test_hr_admin_has_global_department_and_position_access(self):
+        self.authenticate(self.hr_admin)
+
+        departments = self.get_results(
+            self.client.get(self.departments_url)
+        )
+        positions = self.get_results(
+            self.client.get(self.positions_url)
+        )
+
+        self.assertEqual(len(departments), 3)
+        self.assertEqual(len(positions), 4)
+
+    def test_hr_manager_only_sees_own_department(self):
+        self.authenticate(self.hr_manager)
+
+        departments = self.get_results(
+            self.client.get(self.departments_url)
+        )
+
+        self.assertEqual(
+            [item["id"] for item in departments],
+            [self.engineering.id],
+        )
+
+    def test_hr_manager_only_sees_own_department_positions(self):
+        self.authenticate(self.hr_manager)
+
+        positions = self.get_results(
+            self.client.get(self.positions_url)
+        )
+
+        position_ids = {item["id"] for item in positions}
+
+        self.assertEqual(
+            position_ids,
+            {
+                self.engineering_position.id,
+                self.backend_position.id,
+            },
+        )
+
+    def test_hr_manager_cannot_bypass_department_scope_with_filter(self):
+        self.authenticate(self.hr_manager)
+
+        response = self.client.get(
+            self.positions_url,
+            {"department": self.finance.id},
+        )
+
+        positions = self.get_results(response)
+        self.assertEqual(positions, [])
+
+    def test_hr_manager_can_filter_positions_within_own_department(self):
+        self.authenticate(self.hr_manager)
+
+        response = self.client.get(
+            self.positions_url,
+            {"department": self.engineering.id},
+        )
+
+        positions = self.get_results(response)
+
+        self.assertEqual(
+            {item["id"] for item in positions},
+            {
+                self.engineering_position.id,
+                self.backend_position.id,
+            },
+        )
+
+    def test_hr_manager_without_profile_is_denied(self):
+        self.authenticate(self.manager_without_profile)
+
+        for url in (self.departments_url, self.positions_url):
+            with self.subTest(url=url):
+                response = self.client.get(url)
+                self.assertEqual(
+                    response.status_code,
+                    status.HTTP_403_FORBIDDEN,
+                )
+
+    def test_employee_cannot_list_departments_or_positions(self):
+        self.authenticate(self.employee)
+
+        for url in (self.departments_url, self.positions_url):
+            with self.subTest(url=url):
+                response = self.client.get(url)
+                self.assertEqual(
+                    response.status_code,
+                    status.HTTP_403_FORBIDDEN,
+                )
+
+    def test_department_and_position_endpoints_are_read_only(self):
+        self.authenticate(self.hr_admin)
+
+        for url in (self.departments_url, self.positions_url):
+            with self.subTest(url=url):
+                response = self.client.post(url, {})
+                self.assertEqual(
+                    response.status_code,
+                    status.HTTP_405_METHOD_NOT_ALLOWED,
+                )
+
 class EmployeeProfileSerializerTests(TestCase):
     """Tests for the EmployeeProfile serializer."""
 
@@ -303,6 +523,14 @@ class EmployeeProfileRBACAPITests(TestCase):
             hire_date=date(2026, 2, 1),
         )
 
+        self.manager_profile = EmployeeProfile.objects.create(
+            user=self.hr_manager,
+            employee_id="EMP-MGR",
+            department=self.engineering,
+            position=self.backend_developer,
+            hire_date=date(2025, 1, 1),
+        )
+
         self.url = "/api/v1/employees/"
 
     def authenticate(self, user):
@@ -373,7 +601,7 @@ class EmployeeProfileRBACAPITests(TestCase):
             event.details,
         )
 
-    def test_hr_manager_can_view_all_profiles(self):
+    def test_hr_manager_can_only_view_own_department_profiles(self):
         self.authenticate(self.hr_manager)
 
         response = self.client.get(self.url)
@@ -383,9 +611,71 @@ class EmployeeProfileRBACAPITests(TestCase):
             status.HTTP_200_OK,
         )
 
+        returned_ids = {
+            profile["employee_id"]
+            for profile in response.data["results"]
+        }
+
         self.assertEqual(
-            len(response.data["results"]),
-            2,
+            returned_ids,
+            {"EMP-001", "EMP-MGR"},
+        )
+        self.assertNotIn("EMP-002", returned_ids)
+
+    def test_hr_manager_without_profile_is_rejected(self):
+        manager_without_profile = User.objects.create_user(
+            email="manager-no-profile@example.com",
+            name="Manager Without Profile",
+            password="StrongPassword123!",
+            role="HR_MANAGER",
+        )
+        self.authenticate(manager_without_profile)
+
+        response = self.client.get(self.url)
+
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_403_FORBIDDEN,
+        )
+
+    def test_hr_admin_retains_global_profile_access(self):
+        self.authenticate(self.hr_admin)
+
+        response = self.client.get(self.url)
+
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_200_OK,
+        )
+
+        returned_ids = {
+            profile["employee_id"]
+            for profile in response.data["results"]
+        }
+
+        self.assertEqual(
+            returned_ids,
+            {"EMP-001", "EMP-002", "EMP-MGR"},
+        )
+
+    def test_super_admin_retains_global_profile_access(self):
+        self.authenticate(self.super_admin)
+
+        response = self.client.get(self.url)
+
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_200_OK,
+        )
+
+        returned_ids = {
+            profile["employee_id"]
+            for profile in response.data["results"]
+        }
+
+        self.assertEqual(
+            returned_ids,
+            {"EMP-001", "EMP-002", "EMP-MGR"},
         )
 
     def test_hr_admin_can_create_employee_profile(self):
@@ -566,12 +856,12 @@ class EmployeeProfileRBACAPITests(TestCase):
 
         self.assertEqual(
             response.data["results"][0]["employee_id"],
-            "EMP-002",
+            "EMP-001",
         )
 
         self.assertEqual(
             response.data["results"][1]["employee_id"],
-            "EMP-001",
+            "EMP-MGR",
         )
 
     def test_employee_profiles_can_be_ordered_by_created_at(self):
@@ -599,7 +889,7 @@ class EmployeeProfileRBACAPITests(TestCase):
 
         self.assertEqual(
             set(returned_ids),
-            {"EMP-001", "EMP-002"},
+            {"EMP-001", "EMP-MGR"},
         )
 
     def test_employee_profiles_can_be_ordered_by_updated_at(self):
@@ -627,7 +917,7 @@ class EmployeeProfileRBACAPITests(TestCase):
 
         self.assertEqual(
             set(returned_ids),
-            {"EMP-001", "EMP-002"},
+            {"EMP-001", "EMP-MGR"},
         )
 
     def test_employee_profiles_cannot_order_by_sensitive_field(self):
@@ -650,7 +940,7 @@ class EmployeeProfileRBACAPITests(TestCase):
 
         self.assertEqual(
             set(returned_ids),
-            {"EMP-001", "EMP-002"},
+            {"EMP-001", "EMP-MGR"},
         )
 
     def test_employee_profiles_can_combine_filters(self):
@@ -701,7 +991,7 @@ class EmployeeProfileRBACAPITests(TestCase):
 
         self.assertEqual(
             response.data["results"][0]["employee_id"],
-            "EMP-002",
+            "EMP-MGR",
         )
 
         self.assertEqual(
@@ -857,44 +1147,29 @@ class EmployeeProfileRBACAPITests(TestCase):
             {"department": self.engineering.id},
         )
 
-        self.assertEqual(
-            response.status_code,
-            status.HTTP_200_OK,
-        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
 
-        self.assertEqual(
-            len(response.data["results"]),
-            1,
-        )
+        returned_ids = {
+            profile["employee_id"]
+            for profile in response.data["results"]
+        }
 
-        self.assertEqual(
-            response.data["results"][0]["employee_id"],
-            "EMP-001",
-        )
-
+        self.assertEqual(returned_ids, {"EMP-001", "EMP-MGR"})
     def test_employee_profiles_can_be_filtered_by_position(self):
         self.authenticate(self.hr_manager)
 
         response = self.client.get(
             self.url,
-            {"position": self.hr_specialist.id},
+            {"position": self.software_engineer.id},
         )
 
-        self.assertEqual(
-            response.status_code,
-            status.HTTP_200_OK,
-        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
 
-        self.assertEqual(
-            len(response.data["results"]),
-            1,
-        )
-
+        self.assertEqual(len(response.data["results"]), 1)
         self.assertEqual(
             response.data["results"][0]["employee_id"],
-            "EMP-002",
+            "EMP-001",
         )
-
     def test_employee_profiles_can_be_filtered_by_hire_date(self):
         self.authenticate(self.hr_manager)
 
@@ -926,26 +1201,17 @@ class EmployeeProfileRBACAPITests(TestCase):
             {"ordering": "employee_id"},
         )
 
-        self.assertEqual(
-            response.status_code,
-            status.HTTP_200_OK,
-        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
 
-        self.assertEqual(
-            len(response.data["results"]),
-            2,
-        )
-
+        self.assertEqual(len(response.data["results"]), 2)
         self.assertEqual(
             response.data["results"][0]["employee_id"],
             "EMP-001",
         )
-
         self.assertEqual(
             response.data["results"][1]["employee_id"],
-            "EMP-002",
+            "EMP-MGR",
         )
-
     def test_request_with_disallowed_host_is_rejected(self):
         """Requests with an untrusted Host header must be rejected."""
         self.authenticate(self.hr_manager)
@@ -958,6 +1224,77 @@ class EmployeeProfileRBACAPITests(TestCase):
         self.assertEqual(
             response.status_code,
             status.HTTP_400_BAD_REQUEST,
+        )
+
+
+    def test_employee_profiles_can_be_searched_by_employee_id(self):
+        self.authenticate(self.hr_manager)
+
+        response = self.client.get(
+            self.url,
+            {"search": "EMP-001"},
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            [item["employee_id"] for item in response.data["results"]],
+            ["EMP-001"],
+        )
+
+    def test_employee_profiles_can_be_searched_by_department_name(self):
+        self.authenticate(self.hr_manager)
+
+        response = self.client.get(
+            self.url,
+            {"search": "Engineering"},
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            {
+                item["employee_id"]
+                for item in response.data["results"]
+            },
+            {"EMP-001", "EMP-MGR"},
+        )
+
+    def test_employee_profiles_can_be_searched_by_position_title(self):
+        self.authenticate(self.hr_manager)
+
+        response = self.client.get(
+            self.url,
+            {"search": "Backend Developer"},
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            [item["employee_id"] for item in response.data["results"]],
+            ["EMP-MGR"],
+        )
+
+    def test_hr_manager_search_cannot_reveal_other_department_employee(self):
+        self.authenticate(self.hr_manager)
+
+        response = self.client.get(
+            self.url,
+            {"search": "EMP-002"},
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["results"], [])
+
+    def test_hr_admin_can_search_profiles_across_departments(self):
+        self.authenticate(self.hr_admin)
+
+        response = self.client.get(
+            self.url,
+            {"search": "EMP-002"},
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            [item["employee_id"] for item in response.data["results"]],
+            ["EMP-002"],
         )
 
 class DepartmentModelTests(TestCase):
@@ -14235,7 +14572,6 @@ class RiskMetricsServiceTests(TestCase):
             1,
         )
 
-
 class DashboardServiceTests(TestCase):
     """Tests for the dashboard orchestration service."""
 
@@ -15487,7 +15823,6 @@ class DashboardAPITests(TestCase):
 
         mock_service.assert_not_called()
 
-
 class RotateBankEncryptionKeyCommandTests(TestCase):
     """Tests for secure bank encryption key rotation."""
 
@@ -15763,7 +16098,6 @@ class RotateBankEncryptionKeyCommandTests(TestCase):
                 ).decode(),
                 "9876543210",
             )
-
 
 class RecruitmentMetricsServiceTests(TestCase):
     """Tests for aggregate recruitment dashboard metrics."""

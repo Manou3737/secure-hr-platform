@@ -76,6 +76,30 @@ class EmployeeProfileSerializer(serializers.ModelSerializer):
 
         return user
 
+class DepartmentSerializer(serializers.ModelSerializer):
+    """Serialize department information for read-only selection."""
+
+    class Meta:
+        model = Department
+        fields = (
+            "id",
+            "name",
+            "code",
+            "description",
+        )
+
+class PositionSerializer(serializers.ModelSerializer):
+    """Serialize position information for read-only selection."""
+
+    class Meta:
+        model = Position
+        fields = (
+            "id",
+            "title",
+            "department",
+            "description",
+        )
+
 class LeaveRequestSerializer(serializers.ModelSerializer):
     """Serialize employee leave requests."""
     employee = serializers.PrimaryKeyRelatedField(
