@@ -1,5 +1,5 @@
 from rest_framework import status
-from rest_framework.test import APITestCase
+from rest_framework.test import APITestCase, APIClient
 
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -137,26 +137,50 @@ class AuthenticationAPITests(APITestCase):
             format="json",
         )
 
+        # HTTP response
         self.assertEqual(
             response.status_code,
             status.HTTP_200_OK,
         )
-        self.assertIn("access", response.data)
-        self.assertIn("refresh", response.data)
+
+        # Access token is returned in JSON
         self.assertEqual(
             set(response.data.keys()),
-            {
-                "access",
-                "refresh",
-            },
+            {"access"},
         )
 
+        self.assertTrue(response.data["access"])
+        self.assertNotIn("refresh", response.data)
+
+        # Sensitive user information must not be exposed
         self.assertNotIn("password", response.data)
         self.assertNotIn("email", response.data)
         self.assertNotIn("is_staff", response.data)
         self.assertNotIn("is_superuser", response.data)
         self.assertNotIn("role", response.data)
 
+        # Refresh token must be stored in an HttpOnly cookie
+        refresh_cookie = response.cookies.get(
+            "secure_hr_refresh"
+        )
+
+        self.assertIsNotNone(refresh_cookie)
+
+        self.assertTrue(
+            refresh_cookie["httponly"]
+        )
+
+        self.assertEqual(
+            refresh_cookie["samesite"],
+            "Lax",
+        )
+
+        self.assertEqual(
+            refresh_cookie["path"],
+            "/api/v1/auth/",
+        )
+
+        # Verify successful login security event
         event = SecurityEvent.objects.get(
             event_type="LOGIN_SUCCESS"
         )
@@ -165,14 +189,17 @@ class AuthenticationAPITests(APITestCase):
             event.user,
             self.user,
         )
+
         self.assertEqual(
             event.ip_address,
             "127.0.0.1",
         )
+
         self.assertEqual(
             event.request_path,
             reverse("login"),
         )
+
         self.assertIn(
             "successfully",
             event.details,
@@ -211,492 +238,7 @@ class AuthenticationAPITests(APITestCase):
         self.assertNotIn("refresh", response.data)
 
 
-        def test_login_does_not_set_authentication_cookies(self):
-            response = self.client.post(
-                reverse("login"),
-                {
-                    "email": self.user_data["email"],
-                    "password": self.user_data["password"],
-                },
-                format="json",
-            )
-
-            self.assertEqual(
-                response.status_code,
-                status.HTTP_200_OK,
-            )
-
-            self.assertNotIn(
-                "sessionid",
-                response.cookies,
-            )
-
-            self.assertNotIn(
-                "csrftoken",
-                response.cookies,
-            )
-
-        def test_failed_login_is_written_to_siem_log(self):
-            with TemporaryDirectory() as temp_directory:
-                with override_settings(
-                    BASE_DIR=Path(temp_directory)
-                ):
-                    response = self.client.post(
-                        reverse("login"),
-                        {
-                            "email": self.user_data["email"],
-                            "password": "WrongPassword123!",
-                        },
-                        format="json",
-                    )
-
-                    self.assertEqual(
-                        response.status_code,
-                        status.HTTP_400_BAD_REQUEST,
-                    )
-
-                    log_file = (
-                        Path(temp_directory)
-                        / "logs"
-                        / "security-events.jsonl"
-                    )
-
-                    self.assertTrue(
-                        log_file.exists()
-                    )
-
-                    log_content = log_file.read_text(
-                        encoding="utf-8"
-                    )
-
-                    self.assertIn(
-                        "LOGIN_FAILED",
-                        log_content,
-                    )
-
-                    self.assertIn(
-                        "Failed login attempt",
-                        log_content,
-                    )
-
-        def test_siem_log_contains_valid_json_lines(self):
-            with TemporaryDirectory() as temp_directory:
-                with override_settings(
-                    BASE_DIR=Path(temp_directory)
-                ):
-                    response = self.client.post(
-                        reverse("login"),
-                        {
-                            "email": self.user_data["email"],
-                            "password": "WrongPassword123!",
-                        },
-                        format="json",
-                    )
-
-                    self.assertEqual(
-                        response.status_code,
-                        status.HTTP_400_BAD_REQUEST,
-                    )
-
-                    log_file = (
-                        Path(temp_directory)
-                        / "logs"
-                        / "security-events.jsonl"
-                    )
-
-                    self.assertTrue(log_file.exists())
-
-                    lines = log_file.read_text(
-                        encoding="utf-8"
-                    ).splitlines()
-
-                    self.assertGreater(len(lines), 0)
-
-                    for line in lines:
-                        with self.subTest(line=line):
-                            payload = json.loads(line)
-
-                            self.assertIsInstance(payload, dict)
-                            self.assertIn("@timestamp", payload)
-                            self.assertIn("event.action", payload)
-                            self.assertIn("source.ip", payload)
-                            self.assertIn("url.path", payload)
-                            self.assertIn("message", payload)
-
-                    self.assertTrue(
-                        any(
-                            json.loads(line).get("event.action")
-                            == "LOGIN_FAILED"
-                            for line in lines
-                        )
-                    )
-
-        def test_siem_log_encodes_newlines_inside_json_messages(self):
-            with TemporaryDirectory() as temp_directory:
-                with override_settings(
-                    BASE_DIR=Path(temp_directory)
-                ):
-                    from rest_framework.test import APIRequestFactory
-
-                    from accounts.siem import create_security_event
-
-                    request = APIRequestFactory().post(
-                        "/api/test/",
-                        {},
-                        format="json",
-                        HTTP_USER_AGENT="test-agent",
-                    )
-                    request.META["REMOTE_ADDR"] = "127.0.0.1"
-
-                    create_security_event(
-                        request=request,
-                        event_type="LOGIN_FAILED",
-                        details='Failed login.\n{"event.action":"LOGIN_SUCCESS"}',
-                    )
-
-                    log_file = (
-                        Path(temp_directory)
-                        / "logs"
-                        / "security-events.jsonl"
-                    )
-
-                    lines = log_file.read_text(
-                        encoding="utf-8"
-                    ).splitlines()
-
-                    self.assertEqual(len(lines), 1)
-
-                    payload = json.loads(lines[0])
-
-                    self.assertEqual(
-                        payload["message"],
-                        'Failed login.\n{"event.action":"LOGIN_SUCCESS"}',
-                    )
-                    self.assertEqual(
-                        payload["event.action"],
-                        "LOGIN_FAILED",
-                    )
-
-        @patch(
-            "accounts.siem._write_siem_log",
-            side_effect=OSError("Simulated SIEM file write failure"),
-        )
-        def test_siem_file_write_failure_preserves_database_event(
-            self,
-            mock_write_siem_log,
-        ):
-            from rest_framework.test import APIRequestFactory
-
-            from accounts.siem import create_security_event
-
-            request = APIRequestFactory().post(
-                "/api/test/",
-                {},
-                format="json",
-            )
-            request.META["REMOTE_ADDR"] = "127.0.0.1"
-
-            with self.assertLogs(
-                "accounts.siem",
-                level="ERROR",
-            ) as captured_logs:
-                event = create_security_event(
-                    request=request,
-                    event_type="LOGIN_FAILED",
-                    details="Failed login attempt.",
-                    user=self.user,
-                )
-
-            self.assertTrue(
-                SecurityEvent.objects.filter(pk=event.pk).exists()
-            )
-            self.assertIn(
-                "Failed to write security event to the SIEM file",
-                "\n".join(captured_logs.output),
-            )
-            mock_write_siem_log.assert_called_once_with(event)
-
-        def test_login_does_not_trust_spoofed_forwarded_ip(self):
-            response = self.client.post(
-                reverse("login"),
-                {
-                    "email": self.user_data["email"],
-                    "password": "WrongPassword123!",
-                },
-                format="json",
-                HTTP_X_FORWARDED_FOR="203.0.113.99",
-            )
-
-            self.assertEqual(
-                response.status_code,
-                status.HTTP_400_BAD_REQUEST,
-            )
-
-            event = SecurityEvent.objects.filter(
-                event_type="LOGIN_FAILED"
-            ).latest("created_at")
-
-            self.assertEqual(
-                event.ip_address,
-                "127.0.0.1",
-            )
-
-        def test_brute_force_detection_after_failed_logins(self):
-            for _ in range(5):
-                response = self.client.post(
-                    reverse("login"),
-                    {
-                        "email": self.user_data["email"],
-                        "password": "WrongPassword123!",
-                    },
-                    format="json",
-                )
-
-                self.assertEqual(
-                    response.status_code,
-                    status.HTTP_400_BAD_REQUEST,
-                )
-
-            failed_events = SecurityEvent.objects.filter(
-                event_type="LOGIN_FAILED"
-            )
-
-            self.assertEqual(
-                failed_events.count(),
-                5,
-            )
-
-            brute_force_event = SecurityEvent.objects.get(
-                event_type="BRUTE_FORCE_DETECTED"
-            )
-
-            self.assertEqual(
-                brute_force_event.ip_address,
-                "127.0.0.1",
-            )
-
-            self.assertIn(
-                "5 failed login attempts",
-                brute_force_event.details,
-            )
-
-        def test_brute_force_detection_is_written_to_siem_log(self):
-            with TemporaryDirectory() as temp_directory:
-                with override_settings(
-                    BASE_DIR=Path(temp_directory)
-                ):
-                    for _ in range(5):
-                        response = self.client.post(
-                            reverse("login"),
-                            {
-                                "email": self.user_data["email"],
-                                "password": "WrongPassword123!",
-                            },
-                            format="json",
-                        )
-
-                        self.assertEqual(
-                            response.status_code,
-                            status.HTTP_400_BAD_REQUEST,
-                        )
-
-                    log_file = (
-                        Path(temp_directory)
-                        / "logs"
-                        / "security-events.jsonl"
-                    )
-
-                    self.assertTrue(
-                        log_file.exists()
-                    )
-
-                    log_content = log_file.read_text(
-                        encoding="utf-8"
-                    )
-
-                    self.assertIn(
-                        "BRUTE_FORCE_DETECTED",
-                        log_content,
-                    )
-
-                    self.assertIn(
-                        "5 failed login attempts",
-                        log_content,
-                    )
-
-        def test_suspicious_ip_detection_is_written_to_siem_log(self):
-            with TemporaryDirectory() as temp_directory:
-                with override_settings(
-                    BASE_DIR=Path(temp_directory)
-                ):
-                    for _ in range(10):
-                        SecurityEvent.objects.create(
-                            event_type="LOGIN_FAILED",
-                            ip_address="127.0.0.1",
-                            details="Previous failed login.",
-                        )
-
-                    response = self.client.post(
-                        reverse("login"),
-                        {
-                            "email": self.user_data["email"],
-                            "password": "WrongPassword123!",
-                        },
-                        format="json",
-                    )
-
-                    self.assertEqual(
-                        response.status_code,
-                        status.HTTP_400_BAD_REQUEST,
-                    )
-
-                    log_file = (
-                        Path(temp_directory)
-                        / "logs"
-                        / "security-events.jsonl"
-                    )
-
-                    self.assertTrue(
-                        log_file.exists()
-                    )
-
-                    log_content = log_file.read_text(
-                        encoding="utf-8"
-                    )
-
-                    self.assertIn(
-                        "SUSPICIOUS_IP_DETECTED",
-                        log_content,
-                    )
-
-                    self.assertIn(
-                        "10 security events",
-                        log_content,
-                    )
-
-        def test_suspicious_ip_detection_after_excessive_events(self):
-            for _ in range(10):
-                SecurityEvent.objects.create(
-                    event_type="LOGIN_FAILED",
-                    ip_address="127.0.0.1",
-                    details="Previous failed login.",
-                )
-
-            response = self.client.post(
-                reverse("login"),
-                {
-                    "email": self.user_data["email"],
-                    "password": "WrongPassword123!",
-                },
-                format="json",
-            )
-
-            self.assertEqual(
-                response.status_code,
-                status.HTTP_400_BAD_REQUEST,
-            )
-
-            suspicious_ip_event = SecurityEvent.objects.get(
-                event_type="SUSPICIOUS_IP_DETECTED"
-            )
-
-            self.assertEqual(
-                suspicious_ip_event.ip_address,
-                "127.0.0.1",
-            )
-
-            self.assertIn(
-                "10 security events",
-                suspicious_ip_event.details,
-            )
-
-        def test_login_with_invalid_password(self):
-            response = self.client.post(
-                reverse("login"),
-                {
-                    "email": self.user_data["email"],
-                    "password": "WrongPassword123!",
-                },
-                format="json",
-            )
-
-            self.assertEqual(
-                response.status_code,
-                status.HTTP_400_BAD_REQUEST,
-            )
-
-            event = SecurityEvent.objects.get(
-                event_type="LOGIN_FAILED"
-            )
-
-            self.assertIsNone(
-                event.user,
-            )
-            self.assertEqual(
-                event.ip_address,
-                "127.0.0.1",
-            )
-            self.assertEqual(
-                event.request_path,
-                reverse("login"),
-            )
-            self.assertIn(
-                "Failed login attempt",
-                event.details,
-            )
-
-        def test_me_requires_authentication(self):
-            response = self.client.get(reverse("me"))
-
-            self.assertEqual(
-                response.status_code,
-                status.HTTP_401_UNAUTHORIZED,
-            )
-
-        def test_me_returns_authenticated_user(self):
-            login_response = self.client.post(
-                reverse("login"),
-                {
-                    "email": self.user_data["email"],
-                    "password": self.user_data["password"],
-                },
-                format="json",
-            )
-
-            access_token = login_response.data["access"]
-
-            self.client.credentials(
-                HTTP_AUTHORIZATION=f"Bearer {access_token}"
-            )
-
-            response = self.client.get(reverse("me"))
-
-            self.assertEqual(response.status_code, status.HTTP_200_OK)
-            self.assertEqual(
-                response.data["email"],
-                self.user_data["email"],
-            )
-            self.assertEqual(
-                response.data["name"],
-                self.user_data["name"],
-            )
-            self.assertEqual(
-                set(response.data.keys()),
-                {
-                    "id",
-                    "email",
-                    "name",
-                    "email_verified",
-                    "is_active",
-                },
-            )
-
-            self.assertNotIn("password", response.data)
-            self.assertNotIn("is_staff", response.data)
-            self.assertNotIn("is_superuser", response.data)
-            self.assertNotIn("role", response.data)
-
-        def test_login_is_throttled_after_five_attempts(self):
+    def test_login_is_throttled_after_five_attempts(self):
             original_throttle_classes = LoginViewSet.throttle_classes
 
             try:
@@ -734,8 +276,11 @@ class AuthenticationAPITests(APITestCase):
             finally:
                 LoginViewSet.throttle_classes = original_throttle_classes
 
+
 class TokenManagementAPITests(APITestCase):
-    """Tests for refresh token rotation and logout."""
+    """Tests for cookie-based refresh token rotation and logout."""
+
+    REFRESH_COOKIE_NAME = "secure_hr_refresh"
 
     def setUp(self):
         self.email = "tokenuser@example.com"
@@ -748,7 +293,198 @@ class TokenManagementAPITests(APITestCase):
         )
         self.user.email_verified = True
         self.user.save(update_fields=["email_verified"])
-        login_response = self.client.post(
+
+        # Enforce real CSRF validation.
+        self.client = APIClient(enforce_csrf_checks=True)
+        self.client.defaults["HTTP_HOST"] = "localhost"
+
+        # Initialize the CSRF cookie.
+        csrf_response = self.client.get(
+            reverse("csrf"),
+        )
+
+        self.assertEqual(
+            csrf_response.status_code,
+            status.HTTP_200_OK,
+        )
+        self.assertIn("csrftoken", self.client.cookies)
+
+        self.csrf_token = self.client.cookies[
+            "csrftoken"
+        ].value
+
+        # Authenticate and receive the refresh cookie.
+        login_response = self.post_with_csrf(
+            reverse("login"),
+            {
+                "email": self.email,
+                "password": self.password,
+            },
+        )
+
+        self.assertEqual(
+            login_response.status_code,
+            status.HTTP_200_OK,
+        )
+
+        self.access_token = login_response.data["access"]
+
+        self.assertNotIn("refresh", login_response.data)
+        self.assertIn(
+            self.REFRESH_COOKIE_NAME,
+            self.client.cookies,
+        )
+
+        self.refresh_token = self.client.cookies[
+            self.REFRESH_COOKIE_NAME
+        ].value
+
+    def post_with_csrf(self, url, data=None):
+        """Send a POST request with the initialized CSRF token."""
+        return self.client.post(
+            url,
+            data or {},
+            format="json",
+            HTTP_X_CSRFTOKEN=self.csrf_token,
+        )
+
+    def set_refresh_cookie(self, token):
+        """Set a refresh cookie for a specific token."""
+        self.client.cookies[
+            self.REFRESH_COOKIE_NAME
+        ] = token
+
+    def test_refresh_token_returns_new_access_token(self):
+        old_refresh_token = self.refresh_token
+
+        response = self.post_with_csrf(
+            reverse("token_refresh"),
+        )
+
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_200_OK,
+        )
+
+        self.assertEqual(
+            set(response.data.keys()),
+            {"access"},
+        )
+
+        self.assertTrue(response.data["access"])
+        self.assertNotIn("refresh", response.data)
+
+        # The refresh cookie must be rotated.
+        self.assertIn(
+            self.REFRESH_COOKIE_NAME,
+            response.cookies,
+        )
+
+        new_refresh_token = response.cookies[
+            self.REFRESH_COOKIE_NAME
+        ].value
+
+        self.assertTrue(new_refresh_token)
+        self.assertNotEqual(
+            old_refresh_token,
+            new_refresh_token,
+        )
+
+    def test_old_refresh_token_is_blacklisted_after_rotation(self):
+        old_refresh_token = self.refresh_token
+
+        response = self.post_with_csrf(
+            reverse("token_refresh"),
+        )
+
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_200_OK,
+        )
+
+        new_refresh_token = self.client.cookies[
+            self.REFRESH_COOKIE_NAME
+        ].value
+
+        self.assertNotEqual(
+            old_refresh_token,
+            new_refresh_token,
+        )
+
+        # Simulate an attacker replaying the old token.
+        self.set_refresh_cookie(old_refresh_token)
+
+        replay_response = self.post_with_csrf(
+            reverse("token_refresh"),
+        )
+
+        self.assertEqual(
+            replay_response.status_code,
+            status.HTTP_401_UNAUTHORIZED,
+        )
+
+    def test_logout_blacklists_refresh_token_and_clears_cookie(self):
+        refresh_token = self.refresh_token
+
+        response = self.post_with_csrf(
+            reverse("logout"),
+        )
+
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_205_RESET_CONTENT,
+        )
+
+        # The response must delete the refresh cookie.
+        deleted_cookie = response.cookies.get(
+            self.REFRESH_COOKIE_NAME
+        )
+
+        self.assertIsNotNone(deleted_cookie)
+        self.assertEqual(deleted_cookie.value, "")
+        self.assertEqual(
+            deleted_cookie["path"],
+            "/api/v1/auth/",
+        )
+
+        # Replaying the logged-out token must fail.
+        self.set_refresh_cookie(refresh_token)
+
+        refresh_after_logout = self.post_with_csrf(
+            reverse("token_refresh"),
+        )
+
+        self.assertEqual(
+            refresh_after_logout.status_code,
+            status.HTTP_401_UNAUTHORIZED,
+        )
+
+    def test_refresh_without_csrf_is_rejected(self):
+        response = self.client.post(
+            reverse("token_refresh"),
+            {},
+            format="json",
+        )
+
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_403_FORBIDDEN,
+        )
+
+    def test_logout_without_csrf_is_rejected(self):
+        response = self.client.post(
+            reverse("logout"),
+            {},
+            format="json",
+        )
+
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_403_FORBIDDEN,
+        )
+
+    def test_login_without_csrf_is_rejected(self):
+        response = self.client.post(
             reverse("login"),
             {
                 "email": self.email,
@@ -757,80 +493,23 @@ class TokenManagementAPITests(APITestCase):
             format="json",
         )
 
-        self.access_token = login_response.data["access"]
-        self.refresh_token = login_response.data["refresh"]
-
-    def test_refresh_token_returns_new_tokens(self):
-        response = self.client.post(
-            reverse("token_refresh"),
-            {
-                "refresh": self.refresh_token,
-            },
-            format="json",
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_403_FORBIDDEN,
         )
 
-        self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertIn("access", response.data)
-        self.assertIn("refresh", response.data)
-
-    def test_old_refresh_token_is_blacklisted_after_rotation(self):
-        response = self.client.post(
-            reverse("token_refresh"),
-            {
-                "refresh": self.refresh_token,
-            },
-            format="json",
+    def test_refresh_without_cookie_returns_unauthorized(self):
+        self.client.cookies.pop(
+            self.REFRESH_COOKIE_NAME,
+            None,
         )
 
-        self.assertEqual(response.status_code, status.HTTP_200_OK)
-
-        old_refresh_response = self.client.post(
+        response = self.post_with_csrf(
             reverse("token_refresh"),
-            {
-                "refresh": self.refresh_token,
-            },
-            format="json",
         )
 
         self.assertEqual(
-            old_refresh_response.status_code,
-            status.HTTP_401_UNAUTHORIZED,
-        )
-
-    def test_logout_blacklists_refresh_token(self):
-        refresh_response = self.client.post(
-            reverse("token_refresh"),
-            {
-                "refresh": self.refresh_token,
-            },
-            format="json",
-        )
-
-        new_refresh_token = refresh_response.data["refresh"]
-
-        logout_response = self.client.post(
-            reverse("logout"),
-            {
-                "refresh": new_refresh_token,
-            },
-            format="json",
-        )
-
-        self.assertEqual(
-            logout_response.status_code,
-            status.HTTP_205_RESET_CONTENT,
-        )
-
-        refresh_after_logout = self.client.post(
-            reverse("token_refresh"),
-            {
-                "refresh": new_refresh_token,
-            },
-            format="json",
-        )
-
-        self.assertEqual(
-            refresh_after_logout.status_code,
+            response.status_code,
             status.HTTP_401_UNAUTHORIZED,
         )
 
@@ -843,7 +522,7 @@ class TokenManagementAPITests(APITestCase):
         )
 
         response = self.client.get(
-            reverse("me")
+            reverse("me"),
         )
 
         self.assertEqual(
@@ -881,7 +560,7 @@ class TokenManagementAPITests(APITestCase):
         )
 
         response = self.client.get(
-            reverse("me")
+            reverse("me"),
         )
 
         self.assertEqual(
@@ -893,12 +572,36 @@ class TokenManagementAPITests(APITestCase):
         token = RefreshToken.for_user(self.user)
         token.set_exp(lifetime=timedelta(seconds=-1))
 
-        response = self.client.post(
+        self.set_refresh_cookie(str(token))
+
+        response = self.post_with_csrf(
             reverse("token_refresh"),
-            {
-                "refresh": str(token),
-            },
-            format="json",
+        )
+
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_401_UNAUTHORIZED,
+        )
+
+    def test_refresh_rejects_inactive_user(self):
+        self.user.is_active = False
+        self.user.save(update_fields=["is_active"])
+
+        response = self.post_with_csrf(
+            reverse("token_refresh"),
+        )
+
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_401_UNAUTHORIZED,
+        )
+
+    def test_refresh_rejects_unverified_user(self):
+        self.user.email_verified = False
+        self.user.save(update_fields=["email_verified"])
+
+        response = self.post_with_csrf(
+            reverse("token_refresh"),
         )
 
         self.assertEqual(

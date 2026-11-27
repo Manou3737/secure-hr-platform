@@ -35,8 +35,21 @@ class OnboardingPermissionService:
         if not cls._is_active_authenticated_user(user) or journey is None:
             return False
 
-        if user.role in cls.OPERATIONAL_ROLES:
+        if user.role in {"SUPER_ADMIN", "HR_ADMIN"}:
             return True
+
+        if user.role == "HR_MANAGER":
+            manager_profile = getattr(user, "employee_profile", None)
+            manager_department_id = getattr(
+                manager_profile, "department_id", None
+            )
+            return bool(
+                manager_department_id
+                and OnboardingJourney.objects.filter(
+                    pk=journey.pk,
+                    employee__department_id=manager_department_id,
+                ).exists()
+            )
 
         if user.role != "EMPLOYEE":
             return False
@@ -52,8 +65,21 @@ class OnboardingPermissionService:
         if not cls._is_active_authenticated_user(user) or task is None:
             return False
 
-        if user.role in cls.OPERATIONAL_ROLES:
+        if user.role in {"SUPER_ADMIN", "HR_ADMIN"}:
             return True
+
+        if user.role == "HR_MANAGER":
+            manager_profile = getattr(user, "employee_profile", None)
+            manager_department_id = getattr(
+                manager_profile, "department_id", None
+            )
+            return bool(
+                manager_department_id
+                and OnboardingTask.objects.filter(
+                    pk=task.pk,
+                    journey__employee__department_id=manager_department_id,
+                ).exists()
+            )
 
         if user.role != "EMPLOYEE":
             return False

@@ -62,6 +62,52 @@ class Position(models.Model):
     def __str__(self):
         return self.title
 
+class Site(models.Model):
+    """Represents a physical work site belonging to a department."""
+
+    name = models.CharField(
+        max_length=100,
+    )
+
+    code = models.CharField(
+        max_length=20,
+        unique=True,
+    )
+
+    address = models.TextField(
+        blank=True,
+    )
+
+    department = models.ForeignKey(
+        Department,
+        on_delete=models.PROTECT,
+        related_name="sites",
+    )
+
+    is_active = models.BooleanField(
+        default=True,
+    )
+
+    created_at = models.DateTimeField(
+        auto_now_add=True,
+    )
+
+    updated_at = models.DateTimeField(
+        auto_now=True,
+    )
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=("department", "name"),
+                name="unique_site_name_per_department",
+            ),
+        ]
+        ordering = ("name",)
+
+    def __str__(self):
+        return f"{self.name} ({self.department.code})"
+
 class EmployeeProfile(models.Model):
     """Stores HR information associated with a user account."""
 
@@ -86,6 +132,14 @@ class EmployeeProfile(models.Model):
         Position,
         on_delete=models.PROTECT,
         related_name="employee_profiles",
+    )
+
+    site = models.ForeignKey(
+        Site,
+        on_delete=models.PROTECT,
+        related_name="employee_profiles",
+        null=True,
+        blank=True,
     )
 
     phone = models.CharField(

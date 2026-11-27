@@ -27,6 +27,12 @@ const navigation: NavigationItem[] = [
     roles: ['SUPER_ADMIN', 'HR_ADMIN', 'HR_MANAGER'],
   },
   {
+    label: 'Tasks',
+    path: '/tasks',
+    icon: '☑',
+    roles: [],
+  },
+  {
     label: 'Recruitment',
     path: '/recruitment',
     icon: '◎',
@@ -36,12 +42,18 @@ const navigation: NavigationItem[] = [
     label: 'HR Documents',
     path: '/documents',
     icon: '▤',
-    roles: ['SUPER_ADMIN', 'HR_ADMIN', 'HR_MANAGER'],
+    roles: [],
   },
   {
     label: 'Bank Accounts',
     path: '/bank-accounts',
     icon: '▣',
+    roles: ['SUPER_ADMIN', 'HR_ADMIN', 'HR_MANAGER'],
+  },
+  {
+    label: 'Compliance',
+    path: '/compliance',
+    icon: '✓',
     roles: ['SUPER_ADMIN', 'HR_ADMIN', 'HR_MANAGER'],
   },
   {
@@ -58,8 +70,10 @@ const pageTitles: Record<string, string> = {
   '/recruitment': 'Recruitment',
   '/documents': 'HR Documents',
   '/bank-accounts': 'Bank Accounts',
+  '/compliance': 'Compliance',
   '/leave-requests': 'Leave Requests',
   '/profile': 'My Profile',
+  '/tasks': 'Onboarding Tasks',
 }
 
 function formatRole(role?: string) {

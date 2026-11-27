@@ -1,14 +1,21 @@
-from django.contrib.auth.tokens import default_token_generator
 from django.conf import settings
+from django.contrib.auth import get_user_model
+from django.contrib.auth.tokens import default_token_generator
+from django.core.exceptions import ObjectDoesNotExist
 from django.core.mail import send_mail
+from django.http import JsonResponse
+from django.utils.decorators import method_decorator
 from django.utils.encoding import force_bytes, force_str
 from django.utils.http import (
     urlsafe_base64_decode,
     urlsafe_base64_encode,
 )
+from django.views.decorators.csrf import (
+    csrf_protect,
+    ensure_csrf_cookie,
+)
 
 from rest_framework import serializers as drf_serializers, status, viewsets
-from rest_framework import viewsets
 from rest_framework.exceptions import ValidationError
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
@@ -17,7 +24,15 @@ from rest_framework.throttling import AnonRateThrottle
 
 from rest_framework_simplejwt.authentication import JWTAuthentication
 from rest_framework_simplejwt.exceptions import TokenError
+from rest_framework_simplejwt.settings import api_settings
 from rest_framework_simplejwt.tokens import RefreshToken
+
+from drf_spectacular.utils import (
+    OpenApiParameter,
+    OpenApiResponse,
+    extend_schema,
+    inline_serializer,
+)
 
 from . import models
 from . import permissions
@@ -32,19 +47,46 @@ from .siem import (
     create_security_event,
     get_client_ip,
 )
-from drf_spectacular.utils import (
-    OpenApiParameter,
-    OpenApiResponse,
-    extend_schema,
-    inline_serializer,
-)
+
 from .tokens import email_verification_token_generator
+
+@ensure_csrf_cookie
+def csrf_cookie_view(request):
+    """
+    Initializes the CSRF cookie for frontend authentication requests.
+    """
+    return JsonResponse({"detail": "CSRF cookie initialized."})
+
+
+def set_refresh_cookie(response, refresh_token):
+    """
+    Stores the refresh token in an HttpOnly cookie.
+    """
+    response.set_cookie(
+        key=settings.AUTH_REFRESH_COOKIE_NAME,
+        value=refresh_token,
+        max_age=settings.AUTH_REFRESH_COOKIE_MAX_AGE,
+        path=settings.AUTH_REFRESH_COOKIE_PATH,
+        secure=settings.AUTH_REFRESH_COOKIE_SECURE,
+        httponly=settings.AUTH_REFRESH_COOKIE_HTTPONLY,
+        samesite=settings.AUTH_REFRESH_COOKIE_SAMESITE,
+    )
+
+
+def clear_refresh_cookie(response):
+    """
+    Removes the refresh token cookie using the same path and policy.
+    """
+    response.delete_cookie(
+        key=settings.AUTH_REFRESH_COOKIE_NAME,
+        path=settings.AUTH_REFRESH_COOKIE_PATH,
+        samesite=settings.AUTH_REFRESH_COOKIE_SAMESITE,
+    )
 
 class LoginRateThrottle(AnonRateThrottle):
     """Limit anonymous login attempts."""
 
     rate = "5/min"
-
 
 class UserRegistrationViewSet(viewsets.ViewSet):
     """Handles user registration."""
@@ -105,8 +147,6 @@ class UserRegistrationViewSet(viewsets.ViewSet):
             },
             status=status.HTTP_201_CREATED,
         )
-
-
 
 class EmailVerificationViewSet(viewsets.ViewSet):
     """Handles email verification."""
@@ -222,57 +262,55 @@ class EmailVerificationViewSet(viewsets.ViewSet):
             status=status.HTTP_200_OK,
         )
 
-
 class LoginViewSet(viewsets.ViewSet):
-    """Authenticates users and returns JWT tokens."""
+    """Authenticates users and returns an access token."""
 
     serializer_class = serializers.AuthTokenSerializer
+
     throttle_classes = (
         (LoginRateThrottle,)
         if not settings.TESTING
         else ()
     )
+
     permission_classes = (AllowAny,)
 
     @extend_schema(
         summary="Authenticate a user",
         description=(
-            "Authenticates a user and returns access "
-            "and refresh JWT tokens."
+            "Authenticates a user and returns an access token. "
+            "The refresh token is stored in an HttpOnly cookie."
         ),
         request=serializers.AuthTokenSerializer,
         responses={
             200: inline_serializer(
                 name="LoginResponse",
                 fields={
-                    "refresh": drf_serializers.CharField(),
                     "access": drf_serializers.CharField(),
                 },
             ),
             400: OpenApiResponse(
                 description="Invalid login credentials or request."
             ),
+            403: OpenApiResponse(
+                description="CSRF validation failed."
+            ),
         },
     )
+    @method_decorator(csrf_protect)
+
     def create(self, request):
         ip_address = get_client_ip(request)
 
-        detect_suspicious_ip(
-             request,
-             ip_address
-        )
+        detect_suspicious_ip(request, ip_address)
 
         serializer = self.serializer_class(
             data=request.data,
-            context={
-                "request": request
-            },
+            context={"request": request},
         )
 
         try:
-            serializer.is_valid(
-                raise_exception=True
-            )
+            serializer.is_valid(raise_exception=True)
 
         except ValidationError:
             models.AuditLog.objects.create(
@@ -286,120 +324,175 @@ class LoginViewSet(viewsets.ViewSet):
                 details="Failed login attempt.",
             )
 
-            detect_brute_force(
-                request,
-                ip_address,
-            )
-
+            detect_brute_force(request, ip_address)
             raise
 
         user = serializer.validated_data["user"]
 
-        refresh = RefreshToken.for_user(
-            user
-        )
+        refresh = RefreshToken.for_user(user)
 
         models.AuditLog.objects.create(
             user=user,
             action="LOGIN",
-            details=(
-                "User logged in successfully."
-            ),
+            details="User logged in successfully.",
         )
 
         create_security_event(
             request=request,
             user=user,
             event_type="LOGIN_SUCCESS",
-            details=(
-                "User logged in successfully."
-            ),
+            details="User logged in successfully.",
         )
 
-        return Response(
-            {
-                "refresh": str(refresh),
-                "access": str(
-                    refresh.access_token
-
-                 ),
-            },
+        response = Response(
+            {"access": str(refresh.access_token)},
             status=status.HTTP_200_OK,
         )
 
+        set_refresh_cookie(response, str(refresh))
+
+        return response
+
 class LogoutViewSet(viewsets.ViewSet):
-    """Handles user logout by blacklisting the refresh token."""
+    """Logs out a user by blacklisting the refresh cookie."""
 
     permission_classes = (AllowAny,)
 
     @extend_schema(
         summary="Log out a user",
         description=(
-            "Invalidates a refresh token by adding it "
-            "to the token blacklist."
+            "Blacklists the refresh token stored in the HttpOnly cookie "
+            "and clears the cookie."
         ),
-        request=inline_serializer(
-            name="LogoutRequest",
-            fields={
-                "refresh": drf_serializers.CharField(
-                    help_text="Refresh token to invalidate."
-                ),
-            },
-        ),
+        request=None,
         responses={
             205: OpenApiResponse(
                 description="Successfully logged out."
             ),
-            400: OpenApiResponse(
-                description=(
-                    "Refresh token is missing, invalid, "
-                    "or expired."
-                )
+            403: OpenApiResponse(
+                description="CSRF validation failed."
             ),
         },
     )
-
+    @method_decorator(csrf_protect)
     def create(self, request):
-        refresh_token = request.data.get(
-            "refresh"
+        refresh_token = request.COOKIES.get(
+            settings.AUTH_REFRESH_COOKIE_NAME
         )
 
-        if not refresh_token:
-            return Response(
-                {
-                    "detail": (
-                        "Refresh token is required."
-                    )
+        response = Response(
+            {"detail": "Successfully logged out."},
+            status=status.HTTP_205_RESET_CONTENT,
+        )
+
+        if refresh_token:
+            try:
+                token = RefreshToken(refresh_token)
+                token.blacklist()
+            except TokenError:
+                # Logout remains possible with an invalid cookie.
+                pass
+
+        clear_refresh_cookie(response)
+
+        return response
+
+class CookieTokenRefreshView(APIView):
+    """Refreshes access tokens using an HttpOnly refresh cookie."""
+
+    permission_classes = (AllowAny,)
+    authentication_classes = ()
+
+    @extend_schema(
+        summary="Refresh access token",
+        description=(
+            "Uses the refresh token stored in the HttpOnly cookie. "
+            "Returns a new access token and rotates the refresh cookie."
+        ),
+        request=None,
+        responses={
+            200: inline_serializer(
+                name="CookieRefreshResponse",
+                fields={
+                    "access": drf_serializers.CharField(),
                 },
-                status=status.HTTP_400_BAD_REQUEST,
+            ),
+            401: OpenApiResponse(
+                description="Refresh token missing, invalid, expired, "
+                "or associated with an inactive account."
+            ),
+            403: OpenApiResponse(
+                description="CSRF validation failed."
+            ),
+        },
+    )
+    @method_decorator(csrf_protect)
+    def post(self, request):
+        raw_token = request.COOKIES.get(
+            settings.AUTH_REFRESH_COOKIE_NAME
+        )
+
+        if not raw_token:
+            return Response(
+                {"detail": "Refresh token is missing."},
+                status=status.HTTP_401_UNAUTHORIZED,
             )
 
         try:
-            token = RefreshToken(
-                refresh_token
+            refresh = RefreshToken(raw_token)
+
+            user_id = refresh.payload.get(
+                api_settings.USER_ID_CLAIM
             )
 
-            token.blacklist()
+            if user_id is None:
+                raise TokenError("Missing user identifier.")
 
-        except TokenError:
-            return Response(
-                {
-                    "detail": (
-                        "Invalid or expired "
-                        "refresh token."
-                    )
-                },
-                status=status.HTTP_400_BAD_REQUEST,
+            User = get_user_model()
+
+            user = User.objects.get(
+                **{api_settings.USER_ID_FIELD: user_id}
             )
 
-        return Response(
-            {
-                "detail": (
-                    "Successfully logged out."
+            if not user.is_active or not user.email_verified:
+                raise TokenError(
+                    "User account is inactive or unverified."
                 )
-            },
-            status=status.HTTP_205_RESET_CONTENT,
+
+            # Blacklist the previous refresh token.
+            refresh.blacklist()
+
+            # Rotate the token identifier and timestamps.
+            refresh.set_jti()
+            refresh.set_exp()
+            refresh.set_iat()
+            refresh.outstand()
+
+
+            new_access = str(refresh.access_token)
+            new_refresh = str(refresh)
+
+        except (
+            TokenError,
+            ObjectDoesNotExist,
+            ValueError,
+            TypeError,
+        ):
+            response = Response(
+                {"detail": "Invalid or expired refresh token."},
+                status=status.HTTP_401_UNAUTHORIZED,
+            )
+            clear_refresh_cookie(response)
+            return response
+
+        response = Response(
+            {"access": new_access},
+            status=status.HTTP_200_OK,
         )
+
+        set_refresh_cookie(response, new_refresh)
+
+        return response
 
 class PasswordChangeViewSet(viewsets.ViewSet):
     """Allows authenticated users to change their password."""

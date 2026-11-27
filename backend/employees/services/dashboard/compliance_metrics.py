@@ -13,12 +13,22 @@ class ComplianceMetricsService:
     """
 
     @classmethod
-    def get_dashboard(cls, *, department_id=None, as_of=None):
+    def get_dashboard(
+        cls,
+        *,
+        department_id=None,
+        site_id=None,
+        as_of=None,
+        expiring_within_days=30,
+        uploaded_within_days=None,
+    ):
         compliance = EmployeeComplianceService.get_dashboard(
             department_id=department_id,
+            site_id=site_id,
             as_of=as_of,
+            expiring_within_days=expiring_within_days,
+            uploaded_within_days=uploaded_within_days,
         )
-
         headcount = compliance["headcount"]
 
         incomplete_profiles = compliance[
@@ -74,6 +84,12 @@ class ComplianceMetricsService:
                 ],
                 "expired_details": compliance[
                     "expired_documents"
+                ],
+                "recently_uploaded_count": compliance[
+                    "recently_uploaded_document_count"
+                ],
+                "recently_uploaded_details": compliance[
+                    "recently_uploaded_documents"
                 ],
                 "expiring_soon_count": compliance[
                     "documents_expiring_soon_count"

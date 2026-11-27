@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { Link } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 
 import { getEmployees } from '../api/employeeService'
@@ -89,7 +90,14 @@ export default function EmployeesPage() {
     {
       key: 'employee_id',
       header: 'Employee ID',
-      render: (employee) => employee.employee_id,
+      render: (employee) => (
+        <Link
+          to={`/employees/${employee.id}`}
+          className="font-medium text-blue-700 hover:text-blue-900 hover:underline"
+        >
+          {employee.employee_id}
+        </Link>
+      ),
     },
     {
       key: 'user',

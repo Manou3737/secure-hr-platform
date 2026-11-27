@@ -3,22 +3,12 @@ import { beforeEach, describe, expect, it } from 'vitest'
 import {
   clearTokens,
   getAccessToken,
-  getRefreshToken,
   setAccessToken,
-  setTokens,
 } from './tokenStore'
 
-import type { AuthTokens } from './authService'
-
 describe('tokenStore', () => {
-  const tokens: AuthTokens = {
-    access: 'test-access-token',
-    refresh: 'test-refresh-token',
-  }
-
   beforeEach(() => {
     clearTokens()
-    sessionStorage.clear()
   })
 
   it('stores the access token in memory', () => {
@@ -27,37 +17,28 @@ describe('tokenStore', () => {
     expect(getAccessToken()).toBe('new-access-token')
   })
 
-  it('stores the refresh token in sessionStorage', () => {
-    setTokens(tokens)
-
-    expect(getRefreshToken()).toBe('test-refresh-token')
-    expect(sessionStorage.getItem('secure_hr_refresh_token'))
-      .toBe('test-refresh-token')
+  it('returns null when no access token exists', () => {
+    expect(getAccessToken()).toBeNull()
   })
 
-  it('stores both tokens correctly', () => {
-    setTokens(tokens)
+  it('replaces the previous access token', () => {
+    setAccessToken('old-access-token')
+    setAccessToken('new-access-token')
 
-    expect(getAccessToken()).toBe(tokens.access)
-    expect(getRefreshToken()).toBe(tokens.refresh)
+    expect(getAccessToken()).toBe('new-access-token')
   })
 
-  it('clears both tokens', () => {
-    setTokens(tokens)
+  it('clears the access token', () => {
+    setAccessToken('test-access-token')
 
     clearTokens()
 
     expect(getAccessToken()).toBeNull()
-    expect(getRefreshToken()).toBeNull()
-    expect(
-      sessionStorage.getItem('secure_hr_refresh_token'),
-    ).toBeNull()
   })
 
   it('can clear tokens when no session exists', () => {
     expect(() => clearTokens()).not.toThrow()
 
     expect(getAccessToken()).toBeNull()
-    expect(getRefreshToken()).toBeNull()
   })
 })

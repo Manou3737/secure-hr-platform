@@ -5,14 +5,15 @@ import axios, {
 import {
   clearTokens,
   getAccessToken,
-  getRefreshToken,
-  setTokens,
+  setAccessToken,
 } from '../auth/tokenStore'
-
-import type { AuthTokens } from '../auth/authService'
 
 const API_BASE_URL =
   import.meta.env.VITE_API_BASE_URL || '/api/v1'
+
+interface AccessTokenResponse {
+  access: string
+}
 
 const api = axios.create({
   baseURL: API_BASE_URL,
@@ -21,13 +22,15 @@ const api = axios.create({
     Accept: 'application/json',
     'Content-Type': 'application/json',
   },
+  xsrfCookieName: 'csrftoken',
+  xsrfHeaderName: 'X-CSRFToken',
 })
 
 type RetryableRequestConfig = InternalAxiosRequestConfig & {
   _retry?: boolean
 }
 
-let refreshPromise: Promise<AuthTokens> | null = null
+let refreshPromise: Promise<string> | null = null
 
 let sessionExpiredHandler: (() => void) | null = null
 
@@ -35,6 +38,10 @@ export function setSessionExpiredHandler(
   handler: (() => void) | null,
 ): void {
   sessionExpiredHandler = handler
+}
+
+export async function ensureCsrfCookie(): Promise<void> {
+  await api.get('/auth/csrf/')
 }
 
 function expireSession(): void {
@@ -89,52 +96,43 @@ api.interceptors.response.use(
 
     originalRequest._retry = true
 
-    const refreshToken = getRefreshToken()
-
-    if (!refreshToken) {
+    if (!getAccessToken()) {
       expireSession()
       return Promise.reject(error)
     }
 
     if (!refreshPromise) {
-      refreshPromise = axios
-        .post<AuthTokens>(
-          '/auth/refresh/',
-          { refresh: refreshToken },
-          {
-            baseURL: API_BASE_URL,
-            timeout: 15_000,
-            headers: {
-              Accept: 'application/json',
-              'Content-Type': 'application/json',
-            },
-          },
-        )
-        .then(({ data }) => {
-          if (!data.access || !data.refresh) {
+      refreshPromise = (async () => {
+        try {
+          await ensureCsrfCookie()
+
+          const { data } = await api.post<AccessTokenResponse>(
+            '/auth/refresh/',
+          )
+
+          if (!data.access) {
             throw new Error(
-              'The refresh endpoint did not return both tokens.',
+              'The refresh endpoint did not return an access token.',
             )
           }
 
-          setTokens(data)
+          setAccessToken(data.access)
 
-          return data
-        })
-        .catch((refreshError: unknown) => {
+          return data.access
+        } catch (refreshError) {
           expireSession()
           throw refreshError
-        })
-        .finally(() => {
+        } finally {
           refreshPromise = null
-        })
+        }
+      })()
     }
 
     try {
-      const tokens = await refreshPromise
+      const accessToken = await refreshPromise
 
       originalRequest.headers.Authorization =
-        `Bearer ${tokens.access}`
+        `Bearer ${accessToken}`
 
       return api(originalRequest)
     } catch (refreshError) {

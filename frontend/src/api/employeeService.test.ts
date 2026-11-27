@@ -1,7 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import api from './client'
-import { getEmployees } from './employeeService'
+import {
+  getEmployeeById,
+  getEmployees,
+} from './employeeService'
 
 vi.mock('./client', () => ({
   default: {
@@ -36,6 +39,31 @@ describe('employeeService', () => {
     })
 
     expect(result).toEqual(responseData)
+  })
+
+  it('fetches a single employee by ID', async () => {
+    const employee = {
+      id: 1,
+      user: 10,
+      employee_id: 'EMP-001',
+      department: 2,
+      position: 3,
+      phone: '5551234567',
+      hire_date: '2025-01-15',
+      date_of_birth: null,
+      address: 'Private address',
+      created_at: '2025-01-15T10:00:00Z',
+      updated_at: '2025-01-15T10:00:00Z',
+    }
+
+    vi.mocked(api.get).mockResolvedValue({
+      data: employee,
+    } as never)
+
+    const result = await getEmployeeById(1)
+
+    expect(api.get).toHaveBeenCalledWith('/employees/1/')
+    expect(result).toEqual(employee)
   })
 
   it('sends custom pagination parameters', async () => {

@@ -12,6 +12,7 @@ class OnboardingMetricsService:
     Task workload metrics exclude completed and cancelled journeys.
     Cancelled tasks are excluded from progress calculations.
     """
+    OVERDUE_TASKS_LIMIT = 10
 
     @classmethod
     def get_dashboard(cls, *, department_id=None, as_of=None):
@@ -108,6 +109,39 @@ class OnboardingMetricsService:
                 filter=Q(priority=OnboardingTask.Priority.URGENT),
             ),
         )
+
+        overdue_queryset = (
+            task_queryset
+            .filter(
+                due_date__lt=as_of,
+            )
+            .exclude(
+                status__in=[
+                    OnboardingTask.Status.COMPLETED,
+                    OnboardingTask.Status.CANCELLED,
+                ]
+            )
+            .select_related(
+                "journey__employee__user",
+            )
+            .order_by(
+                "due_date",
+            )[:cls.OVERDUE_TASKS_LIMIT]
+        )
+
+        overdue_details = [
+            {
+                "id": task.pk,
+                "title": task.title,
+                "due_date": task.due_date,
+                "priority": task.priority,
+                "status": task.status,
+                "employee_name": task.journey.employee.user.name,
+            }
+            for task in overdue_queryset
+        ]
+
+        task_metrics["overdue_details"] = overdue_details
 
         progress_total = (
             task_metrics["total"] - task_metrics["cancelled"]

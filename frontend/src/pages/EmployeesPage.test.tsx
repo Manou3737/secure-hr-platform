@@ -1,6 +1,7 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { MemoryRouter } from 'react-router-dom'
 
 import { getEmployees } from '../api/employeeService'
 import type {
@@ -71,9 +72,11 @@ function renderEmployeesPage() {
   })
 
   return render(
-    <QueryClientProvider client={queryClient}>
-      <EmployeesPage />
-    </QueryClientProvider>,
+    <MemoryRouter>
+      <QueryClientProvider client={queryClient}>
+        <EmployeesPage />
+      </QueryClientProvider>
+    </MemoryRouter>,
   )
 }
 
@@ -98,7 +101,9 @@ describe('EmployeesPage', () => {
     renderEmployeesPage()
 
     expect(await screen.findByText('EMP-001')).toBeInTheDocument()
-
+    expect(
+      screen.getByRole('link', { name: 'EMP-001' }),
+    ).toHaveAttribute('href', '/employees/1')
     expect(screen.getByText('10')).toBeInTheDocument()
     expect(screen.getByText('2')).toBeInTheDocument()
     expect(screen.getByText('3')).toBeInTheDocument()

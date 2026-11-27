@@ -46,6 +46,7 @@ from .models import (
     BankAccount,
     PerformanceReview,
     Position,
+    Site,
     HRDocument,
     DocumentVersion,
     DocumentReview,
@@ -191,7 +192,26 @@ class DepartmentPositionRBACAPITests(TestCase):
             name="Finance",
             code="FIN",
         )
+        self.engineering_site = Site.objects.create(
+            name="Engineering Office",
+            code="ENG-HQ",
+            address="Engineering Main Office",
+            department=self.engineering,
+        )
 
+        self.hr_site = Site.objects.create(
+            name="HR Office",
+            code="HR-HQ",
+            address="Human Resources Main Office",
+            department=self.hr,
+        )
+
+        self.finance_site = Site.objects.create(
+            name="Finance Office",
+            code="FIN-HQ",
+            address="Finance Main Office",
+            department=self.finance,
+        )
         self.engineering_position = Position.objects.create(
             title="Software Engineer",
             department=self.engineering,
@@ -218,6 +238,7 @@ class DepartmentPositionRBACAPITests(TestCase):
         )
 
         self.departments_url = "/api/v1/employees/departments/"
+        self.sites_url = "/api/v1/employees/sites/"
         self.positions_url = "/api/v1/employees/positions/"
 
     def authenticate(self, user):
@@ -356,6 +377,114 @@ class DepartmentPositionRBACAPITests(TestCase):
                     status.HTTP_405_METHOD_NOT_ALLOWED,
                 )
 
+    def test_super_admin_has_global_site_access(self):
+        self.authenticate(self.super_admin)
+
+        sites = self.get_results(
+            self.client.get(self.sites_url)
+        )
+
+        self.assertEqual(
+            {item["id"] for item in sites},
+            {
+                self.engineering_site.id,
+                self.hr_site.id,
+                self.finance_site.id,
+            },
+        )
+
+    def test_hr_admin_has_global_site_access(self):
+        self.authenticate(self.hr_admin)
+
+        sites = self.get_results(
+            self.client.get(self.sites_url)
+        )
+
+        self.assertEqual(
+            {item["id"] for item in sites},
+            {
+                self.engineering_site.id,
+                self.hr_site.id,
+                self.finance_site.id,
+            },
+        )
+
+    def test_hr_manager_only_sees_own_department_sites(self):
+        self.authenticate(self.hr_manager)
+
+        sites = self.get_results(
+            self.client.get(self.sites_url)
+        )
+
+        self.assertEqual(
+            [item["id"] for item in sites],
+            [self.engineering_site.id],
+        )
+
+    def test_hr_manager_cannot_bypass_site_department_scope(self):
+        self.authenticate(self.hr_manager)
+
+        response = self.client.get(
+            self.sites_url,
+            {"department": self.finance.id},
+        )
+
+        sites = self.get_results(response)
+        self.assertEqual(sites, [])
+
+    def test_hr_manager_can_filter_sites_within_own_department(self):
+        self.authenticate(self.hr_manager)
+
+        response = self.client.get(
+            self.sites_url,
+            {"department": self.engineering.id},
+        )
+
+        sites = self.get_results(response)
+
+        self.assertEqual(
+            {item["id"] for item in sites},
+            {self.engineering_site.id},
+        )
+
+    def test_hr_manager_without_profile_is_denied_site_access(self):
+        self.authenticate(self.manager_without_profile)
+
+        response = self.client.get(self.sites_url)
+
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_403_FORBIDDEN,
+        )
+
+    def test_employee_cannot_list_sites(self):
+        self.authenticate(self.employee)
+
+        response = self.client.get(self.sites_url)
+
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_403_FORBIDDEN,
+        )
+
+    def test_unauthenticated_user_cannot_list_sites(self):
+        response = self.client.get(self.sites_url)
+
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_401_UNAUTHORIZED,
+        )
+
+    def test_site_endpoint_is_read_only(self):
+        self.authenticate(self.hr_admin)
+
+        response = self.client.post(self.sites_url, {})
+
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_405_METHOD_NOT_ALLOWED,
+        )
+
 class EmployeeProfileSerializerTests(TestCase):
     """Tests for the EmployeeProfile serializer."""
 
@@ -396,6 +525,7 @@ class EmployeeProfileSerializerTests(TestCase):
             "employee_id",
             "department",
             "position",
+            "site",
             "phone",
             "hire_date",
             "date_of_birth",
@@ -423,6 +553,59 @@ class EmployeeProfileSerializerTests(TestCase):
         self.assertTrue(
             serializer.fields["updated_at"].read_only
         )
+
+    def test_site_is_optional(self):
+        serializer = EmployeeProfileSerializer(
+            self.profile,
+            data={
+                "site": None,
+            },
+            partial=True,
+        )
+
+        self.assertTrue(serializer.is_valid(), serializer.errors)
+        self.assertIsNone(serializer.validated_data["site"])
+
+    def test_site_from_same_department_is_valid(self):
+        site = Site.objects.create(
+            name="Engineering Office",
+            code="ENG-HQ",
+            department=self.department,
+        )
+
+        serializer = EmployeeProfileSerializer(
+            self.profile,
+            data={
+                "site": site.id,
+            },
+            partial=True,
+        )
+
+        self.assertTrue(serializer.is_valid(), serializer.errors)
+        self.assertEqual(serializer.validated_data["site"], site)
+
+    def test_site_from_another_department_is_rejected(self):
+        other_department = Department.objects.create(
+            name="Finance",
+            code="FIN",
+        )
+
+        other_site = Site.objects.create(
+            name="Finance Office",
+            code="FIN-HQ",
+            department=other_department,
+        )
+
+        serializer = EmployeeProfileSerializer(
+            self.profile,
+            data={
+                "site": other_site.id,
+            },
+            partial=True,
+        )
+
+        self.assertFalse(serializer.is_valid())
+        self.assertIn("site", serializer.errors)
 
 class EmployeeProfileRBACAPITests(TestCase):
     """Tests for employee API role-based access control."""
@@ -10397,6 +10580,10 @@ class OnboardingPermissionServiceTests(TestCase):
             name="Permission Department",
             code="PERM",
         )
+        other_department = Department.objects.create(
+            name="Other Permission Department",
+            code="PERM-OTHER",
+        )
         position = Position.objects.create(
             title="Permission Specialist",
             department=department,
@@ -10409,14 +10596,25 @@ class OnboardingPermissionServiceTests(TestCase):
             position=position,
             hire_date=date.today(),
         )
+        other_position = Position.objects.create(
+            title="Other Permission Specialist",
+            department=other_department,
+        )
+
         self.other_employee = EmployeeProfile.objects.create(
             user=self.other_employee_user,
             employee_id="PERM-002",
+            department=other_department,
+            position=other_position,
+            hire_date=date.today(),
+        )
+        self.manager_profile = EmployeeProfile.objects.create(
+            user=self.manager,
+            employee_id="PERM-MGR",
             department=department,
             position=position,
             hire_date=date.today(),
         )
-
         template = OnboardingTemplate.objects.create(
             name="Permission test template",
             description="Template for permission tests",
@@ -10494,20 +10692,17 @@ class OnboardingPermissionServiceTests(TestCase):
             OnboardingPermissionService as Permissions,
         )
 
+        self.assertFalse(
+            Permissions.can_view_journey(self.manager, self.other_journey)
+        )
         self.assertTrue(
-            Permissions.can_view_journey(
-                self.employee_user,
-                self.journey,
-            )
+            Permissions.can_view_journey(self.manager, self.journey)
         )
         self.assertFalse(
             Permissions.can_view_journey(
                 self.employee_user,
                 self.other_journey,
             )
-        )
-        self.assertTrue(
-            Permissions.can_view_journey(self.manager, self.other_journey)
         )
 
     def test_employee_can_view_own_task_but_not_another_employee_task(self):
@@ -10521,8 +10716,11 @@ class OnboardingPermissionServiceTests(TestCase):
         self.assertFalse(
             Permissions.can_view_task(self.employee_user, self.other_task)
         )
-        self.assertTrue(
+        self.assertFalse(
             Permissions.can_view_task(self.manager, self.other_task)
+        )
+        self.assertTrue(
+            Permissions.can_view_task(self.manager, self.task)
         )
 
     def test_assigned_employee_can_view_task_outside_own_journey(self):
@@ -10633,14 +10831,43 @@ class OnboardingRBACAPITests(TestCase):
             role="EMPLOYEE",
         )
 
+        self.engineering = Department.objects.create(
+            name="Onboarding Engineering",
+            code="ONB-ENG",
+        )
+        self.finance = Department.objects.create(
+            name="Onboarding Finance",
+            code="ONB-FIN",
+        )
+
+        self.engineering_position = Position.objects.create(
+            title="Onboarding Engineer",
+            department=self.engineering,
+        )
+        self.finance_position = Position.objects.create(
+            title="Onboarding Financial Analyst",
+            department=self.finance,
+        )
+
+        self.hr_manager_profile = EmployeeProfile.objects.create(
+            user=self.hr_manager,
+            employee_id="ONBAPI-MGR",
+            department=self.engineering,
+            position=self.engineering_position,
+            hire_date=date.today(),
+        )
         self.employee = EmployeeProfile.objects.create(
             user=self.employee_user,
             employee_id="ONBAPI-002",
+            department=self.engineering,
+            position=self.engineering_position,
             hire_date=date.today(),
         )
         self.other_employee = EmployeeProfile.objects.create(
             user=self.other_employee_user,
             employee_id="ONBAPI-001",
+            department=self.finance,
+            position=self.finance_position,
             hire_date=date.today(),
         )
 
@@ -10687,18 +10914,37 @@ class OnboardingRBACAPITests(TestCase):
     def authenticate(self, user):
         self.client.force_authenticate(user=user)
 
-    def test_hr_roles_can_list_all_journeys(self):
-        for user in (
-            self.super_admin,
-            self.hr_admin,
-            self.hr_manager,
-        ):
+    def test_hr_admin_and_super_admin_can_list_all_journeys(self):
+        for user in (self.super_admin, self.hr_admin):
             with self.subTest(role=user.role):
                 self.authenticate(user)
                 response = self.client.get(self.journeys_url)
 
                 self.assertEqual(response.status_code, status.HTTP_200_OK)
                 self.assertEqual(response.data["count"], 2)
+
+    def test_hr_manager_only_lists_own_department_journeys(self):
+        self.authenticate(self.hr_manager)
+
+        response = self.client.get(self.journeys_url)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["count"], 1)
+        self.assertEqual(
+            str(response.data["results"][0]["id"]),
+            str(self.journey.pk),
+        )
+
+    def test_hr_manager_cannot_retrieve_other_department_journey(self):
+        self.authenticate(self.hr_manager)
+        url = self.reverse(
+            "onboarding-journey-detail",
+            kwargs={"pk": self.other_journey.pk},
+        )
+
+        response = self.client.get(url)
+
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
 
     def test_employee_only_sees_own_journey(self):
         self.authenticate(self.employee_user)
@@ -10723,18 +10969,37 @@ class OnboardingRBACAPITests(TestCase):
 
         self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
 
-    def test_hr_roles_can_list_all_tasks(self):
-        for user in (
-            self.super_admin,
-            self.hr_admin,
-            self.hr_manager,
-        ):
+    def test_hr_admin_and_super_admin_can_list_all_tasks(self):
+        for user in (self.super_admin, self.hr_admin):
             with self.subTest(role=user.role):
                 self.authenticate(user)
                 response = self.client.get(self.tasks_url)
 
                 self.assertEqual(response.status_code, status.HTTP_200_OK)
                 self.assertEqual(response.data["count"], 2)
+
+    def test_hr_manager_only_lists_own_department_tasks(self):
+        self.authenticate(self.hr_manager)
+
+        response = self.client.get(self.tasks_url)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["count"], 1)
+        self.assertEqual(
+            str(response.data["results"][0]["id"]),
+            str(self.task.pk),
+        )
+
+    def test_hr_manager_cannot_retrieve_other_department_task(self):
+        self.authenticate(self.hr_manager)
+        url = self.reverse(
+            "onboarding-task-detail",
+            kwargs={"pk": self.other_task.pk},
+        )
+
+        response = self.client.get(url)
+
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
 
     def test_employee_only_sees_tasks_from_own_journey(self):
         self.authenticate(self.employee_user)
@@ -12575,6 +12840,83 @@ class OnboardingMetricsServiceTests(TestCase):
 
         self.assertEqual(result["tasks"]["overdue"], 1)
 
+    def test_overdue_details_include_only_actionable_overdue_tasks(self):
+        as_of = date.today()
+
+        overdue_task = self.create_task(
+            title="Actionable overdue task",
+            priority="URGENT",
+            status="BLOCKED",
+            due_date=as_of - timedelta(days=2),
+        )
+
+        self.create_task(
+            title="Due today task",
+            due_date=as_of,
+        )
+
+        self.create_task(
+            title="Completed overdue task",
+            status="COMPLETED",
+            due_date=as_of - timedelta(days=3),
+        )
+
+        self.create_task(
+            title="Cancelled overdue task",
+            status="CANCELLED",
+            due_date=as_of - timedelta(days=4),
+        )
+
+        result = self.OnboardingMetricsService.get_dashboard(
+            as_of=as_of,
+        )
+
+        details = result["tasks"]["overdue_details"]
+
+        self.assertEqual(len(details), 1)
+        self.assertEqual(details[0]["id"], overdue_task.pk)
+        self.assertEqual(
+            details[0]["title"],
+            "Actionable overdue task",
+        )
+        self.assertEqual(
+            details[0]["due_date"],
+            as_of - timedelta(days=2),
+        )
+        self.assertEqual(details[0]["priority"], "URGENT")
+        self.assertEqual(details[0]["status"], "BLOCKED")
+        self.assertEqual(
+            details[0]["employee_name"],
+            "Metrics Employee",
+        )
+
+    def test_overdue_details_are_limited_to_ten_oldest_tasks(self):
+        as_of = date.today()
+
+        for days_ago in range(1, 13):
+            self.create_task(
+                title=f"Overdue task {days_ago}",
+                due_date=as_of - timedelta(days=days_ago),
+            )
+
+        result = self.OnboardingMetricsService.get_dashboard(
+            as_of=as_of,
+        )
+
+        self.assertEqual(result["tasks"]["overdue"], 12)
+        self.assertEqual(
+            len(result["tasks"]["overdue_details"]),
+            10,
+        )
+        self.assertEqual(
+            result["tasks"]["overdue_details"][0]["title"],
+            "Overdue task 12",
+        )
+        self.assertEqual(
+            result["tasks"]["overdue_details"][-1]["title"],
+            "Overdue task 3",
+        )
+
     def test_completed_tasks_are_excluded_from_overdue_count(self):
         self.create_task(
             title="Completed task",
@@ -12696,6 +13038,14 @@ class OnboardingMetricsServiceTests(TestCase):
         self.assertEqual(result["tasks"]["cancelled"], 1)
         self.assertEqual(result["tasks"]["blocked"], 1)
         self.assertEqual(result["tasks"]["overdue"], 1)
+        self.assertEqual(
+            len(result["tasks"]["overdue_details"]),
+            1,
+        )
+        self.assertEqual(
+            result["tasks"]["overdue_details"][0]["title"],
+            "Overdue blocked selected task",
+        )
 
         # Priority indicators must also exclude the other department.
         self.assertEqual(result["tasks"]["low_priority"], 1)
@@ -13400,7 +13750,6 @@ class ComplianceMetricsServiceTests(TestCase):
             result["documents"],
         )
 
-
     def test_department_filter_isolates_all_compliance_metrics(self):
         from employees.models import HRDocument
 
@@ -13540,7 +13889,6 @@ class ComplianceMetricsServiceTests(TestCase):
             employee_a.user.name,
         )
 
-
     def test_dashboard_supports_department_filter(self):
         self.create_employee(
             "COMP-005",
@@ -13552,6 +13900,169 @@ class ComplianceMetricsServiceTests(TestCase):
         )
 
         self.assertEqual(result["headcount"], 1)
+
+    def test_site_filter_isolates_compliance_metrics(self):
+        from employees.models import Site
+
+        site = Site.objects.create(
+            name="Compliance Main Office",
+            code="COMP-MAIN",
+            department=self.department,
+        )
+
+        employee_a = self.create_employee(
+            "COMP-SITE-001",
+            "site-a@example.com",
+            site=site,
+        )
+
+        self.create_employee(
+            "COMP-SITE-002",
+            "site-b@example.com",
+        )
+
+        result = self.ComplianceMetricsService.get_dashboard(
+            department_id=self.department.pk,
+            site_id=site.pk,
+        )
+
+        self.assertEqual(result["headcount"], 1)
+        self.assertEqual(
+            result["profiles"]["incomplete"],
+            1,
+        )
+        self.assertEqual(
+            result["documents"]["employees_missing_required_documents"],
+            1,
+        )
+        self.assertEqual(
+            result["documents"]["missing_documents_details"][0]["employee_name"],
+            employee_a.user.name,
+        )
+
+    def test_expiration_filter_respects_selected_period(self):
+        from employees.models import HRDocument
+
+        as_of = date(2026, 11, 25)
+
+        employee = self.create_employee(
+            "COMP-EXP-001",
+            "expiration-filter@example.com",
+        )
+
+        for filename, expiration_date in [
+            ("expires-in-5-days.pdf", date(2026, 11, 30)),
+            ("expires-in-20-days.pdf", date(2026, 12, 15)),
+        ]:
+            HRDocument.objects.create(
+                employee=employee,
+                title=filename,
+                document_type=HRDocument.DocumentType.CERTIFICATION,
+                original_filename=filename,
+                storage_key=f"hr-documents/expiration-filter/{filename}",
+                mime_type="application/pdf",
+                size_bytes=1024,
+                uploaded_by=self.admin,
+                status=HRDocument.Status.VERIFIED,
+                expires_at=expiration_date,
+            )
+
+        result_7_days = self.ComplianceMetricsService.get_dashboard(
+            department_id=self.department.pk,
+            as_of=as_of,
+            expiring_within_days=7,
+        )
+
+        result_30_days = self.ComplianceMetricsService.get_dashboard(
+            department_id=self.department.pk,
+            as_of=as_of,
+            expiring_within_days=30,
+        )
+
+        self.assertEqual(
+            result_7_days["documents"]["expiring_soon_count"],
+            1,
+        )
+        self.assertEqual(
+            result_30_days["documents"]["expiring_soon_count"],
+            2,
+        )
+
+    def test_recent_upload_filter_respects_selected_period(self):
+        from datetime import datetime, time, timedelta
+        from django.utils import timezone
+        from employees.models import HRDocument
+
+        as_of = date(2026, 11, 25)
+
+        employee = self.create_employee(
+            "COMP-UPLOAD-001",
+            "upload-filter@example.com",
+        )
+
+        documents = []
+
+        for filename, status in [
+            ("recent-verified.pdf", HRDocument.Status.VERIFIED),
+            ("recent-pending.pdf", HRDocument.Status.PENDING_REVIEW),
+            ("older-rejected.pdf", HRDocument.Status.REJECTED),
+        ]:
+            document = HRDocument.objects.create(
+                employee=employee,
+                title=filename,
+                document_type=HRDocument.DocumentType.CERTIFICATION,
+                original_filename=filename,
+                storage_key=f"hr-documents/upload-filter/{filename}",
+                mime_type="application/pdf",
+                size_bytes=1024,
+                uploaded_by=self.admin,
+                status=status,
+                expires_at=None,
+            )
+            documents.append(document)
+
+        upload_dates = [
+            as_of - timedelta(days=2),
+            as_of - timedelta(days=5),
+            as_of - timedelta(days=20),
+        ]
+
+        for document, upload_date in zip(documents, upload_dates):
+            uploaded_at = timezone.make_aware(
+                datetime.combine(upload_date, time(12, 0))
+            )
+            HRDocument.objects.filter(pk=document.pk).update(
+                uploaded_at=uploaded_at,
+            )
+
+        result_7_days = self.ComplianceMetricsService.get_dashboard(
+            department_id=self.department.pk,
+            as_of=as_of,
+            uploaded_within_days=7,
+        )
+
+        result_30_days = self.ComplianceMetricsService.get_dashboard(
+            department_id=self.department.pk,
+            as_of=as_of,
+            uploaded_within_days=30,
+        )
+
+        self.assertEqual(
+            result_7_days["documents"]["recently_uploaded_count"],
+            2,
+        )
+        self.assertEqual(
+            result_30_days["documents"]["recently_uploaded_count"],
+            3,
+        )
+
+        details = result_30_days["documents"]["recently_uploaded_details"]
+
+        self.assertEqual(len(details), 3)
+        self.assertIn("status", details[0])
+        self.assertIn("uploaded_at", details[0])
+        self.assertNotIn("storage_key", details[0])
+        self.assertNotIn("original_filename", details[0])
 
 class SecurityMetricsServiceTests(TestCase):
     """Tests for SOC/SIEM security dashboard metrics."""
@@ -15021,6 +15532,14 @@ class DashboardServiceTests(TestCase):
             1,
         )
         self.assertTrue(compliance["documents"]["expired_details"])
+        self.assertEqual(
+            len(compliance["documents"]["expired_details"]),
+            1,
+        )
+        self.assertEqual(
+            compliance["documents"]["expired_details"][0]["employee_id"],
+            str(employee.pk),
+        )
         self.assertTrue(
             compliance["documents"]["expiring_soon_details"]
         )
@@ -15034,6 +15553,22 @@ class DashboardServiceTests(TestCase):
         self.assertEqual(onboarding["tasks"]["total"], 1)
         self.assertEqual(onboarding["tasks"]["urgent_priority"], 1)
         self.assertEqual(onboarding["tasks"]["overdue"], 1)
+        self.assertEqual(
+            len(onboarding["tasks"]["overdue_details"]),
+            1,
+        )
+
+        overdue_detail = onboarding["tasks"]["overdue_details"][0]
+
+        self.assertEqual(overdue_detail["id"], str(task.pk))
+        self.assertEqual(overdue_detail["title"], task.title)
+        self.assertEqual(overdue_detail["due_date"], (today - timedelta(days=1)).isoformat())
+        self.assertEqual(overdue_detail["priority"], "URGENT")
+        self.assertEqual(overdue_detail["status"], task.status)
+        self.assertEqual(
+            overdue_detail["employee_name"],
+            "Dashboard Contract Employee",
+        )
         self.assertEqual(
             onboarding["progress"]["total_eligible_tasks"],
             1,
@@ -15174,114 +15709,6 @@ class DashboardServiceTests(TestCase):
             0,
         )
         self.assertEqual(recruitment["daily_activity"], [])
-
-class DashboardFilterSerializerTests(TestCase):
-    """Tests for the HR dashboard filter serializer."""
-
-    def setUp(self):
-        self.department = Department.objects.create(
-            name="Dashboard Engineering",
-            code="DASH-ENG",
-        )
-
-    def test_default_values_are_applied(self):
-        serializer = DashboardFilterSerializer(data={})
-
-        self.assertTrue(serializer.is_valid(), serializer.errors)
-        self.assertEqual(serializer.validated_data["days"], 7)
-        self.assertEqual(serializer.validated_data["recent_limit"], 10)
-
-    def test_existing_department_is_valid(self):
-        serializer = DashboardFilterSerializer(
-            data={"department_id": self.department.pk}
-        )
-
-        self.assertTrue(serializer.is_valid(), serializer.errors)
-        self.assertEqual(
-            serializer.validated_data["department_id"],
-            self.department.pk,
-        )
-
-    def test_nonexistent_department_is_invalid(self):
-        serializer = DashboardFilterSerializer(
-            data={"department_id": 999999}
-        )
-
-        self.assertFalse(serializer.is_valid())
-        self.assertIn("department_id", serializer.errors)
-
-    def test_zero_department_id_is_invalid(self):
-        serializer = DashboardFilterSerializer(
-            data={"department_id": 0}
-        )
-
-        self.assertFalse(serializer.is_valid())
-        self.assertIn("department_id", serializer.errors)
-
-    def test_days_boundaries(self):
-        for value in (1, 365):
-            with self.subTest(days=value):
-                serializer = DashboardFilterSerializer(
-                    data={"days": value}
-                )
-                self.assertTrue(serializer.is_valid(), serializer.errors)
-
-    def test_days_outside_boundaries_are_invalid(self):
-        for value in (0, 366):
-            with self.subTest(days=value):
-                serializer = DashboardFilterSerializer(
-                    data={"days": value}
-                )
-                self.assertFalse(serializer.is_valid())
-                self.assertIn("days", serializer.errors)
-
-    def test_recent_limit_boundaries(self):
-        for value in (1, 100):
-            with self.subTest(recent_limit=value):
-                serializer = DashboardFilterSerializer(
-                    data={"recent_limit": value}
-                )
-                self.assertTrue(serializer.is_valid(), serializer.errors)
-
-    def test_recent_limit_outside_boundaries_is_invalid(self):
-        for value in (0, 101):
-            with self.subTest(recent_limit=value):
-                serializer = DashboardFilterSerializer(
-                    data={"recent_limit": value}
-                )
-                self.assertFalse(serializer.is_valid())
-                self.assertIn("recent_limit", serializer.errors)
-
-    def test_past_reference_date_is_valid(self):
-        past_date = date.today() - timedelta(days=1)
-
-        serializer = DashboardFilterSerializer(
-            data={"as_of": past_date.isoformat()}
-        )
-
-        self.assertTrue(serializer.is_valid(), serializer.errors)
-        self.assertEqual(
-            serializer.validated_data["as_of"],
-            past_date,
-        )
-
-    def test_future_reference_date_is_invalid(self):
-        future_date = date.today() + timedelta(days=1)
-
-        serializer = DashboardFilterSerializer(
-            data={"as_of": future_date.isoformat()}
-        )
-
-        self.assertFalse(serializer.is_valid())
-        self.assertIn("as_of", serializer.errors)
-
-    def test_malformed_reference_date_is_invalid(self):
-        serializer = DashboardFilterSerializer(
-            data={"as_of": "not-a-date"}
-        )
-
-        self.assertFalse(serializer.is_valid())
-        self.assertIn("as_of", serializer.errors)
 
 class DashboardPermissionTests(TestCase):
     """Unit tests for HR dashboard access permissions."""
@@ -15501,6 +15928,7 @@ class DashboardAPITests(TestCase):
         )
 
         mock_service.assert_called_once_with(
+            expiring_within_days=30,
             days=7,
             recent_limit=10,
         )
@@ -15536,6 +15964,7 @@ class DashboardAPITests(TestCase):
         mock_service.assert_called_once_with(
             department_id=self.department.pk,
             as_of=reference_date,
+            expiring_within_days=30,
             days=30,
             recent_limit=25,
         )
@@ -15647,6 +16076,7 @@ class DashboardAPITests(TestCase):
 
         mock_service.assert_called_once_with(
             department_id=self.department.pk,
+            expiring_within_days=30,
             days=7,
             recent_limit=10,
         )
@@ -15669,9 +16099,104 @@ class DashboardAPITests(TestCase):
 
         mock_service.assert_called_once_with(
             department_id=self.department.pk,
+            expiring_within_days=30,
             days=7,
             recent_limit=10,
         )
+
+    def test_hr_manager_can_filter_own_department_site(self):
+        site = Site.objects.create(
+            name="Engineering Headquarters",
+            code="DASH-ENG-HQ",
+            department=self.department,
+        )
+
+        self.client.force_authenticate(user=self.hr_manager)
+
+        with patch(
+            "employees.views.DashboardService.get_dashboard",
+            return_value=self.dashboard_data,
+        ) as mock_service:
+            response = self.client.get(
+                self.dashboard_url,
+                {"site_id": site.pk},
+            )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+        mock_service.assert_called_once_with(
+            department_id=self.department.pk,
+            site_id=site.pk,
+            expiring_within_days=30,
+            days=7,
+            recent_limit=10,
+        )
+
+    def test_hr_manager_cannot_filter_another_department_site(self):
+        another_department = Department.objects.create(
+            name="Dashboard Finance",
+            code="DASH-FIN",
+        )
+        another_site = Site.objects.create(
+            name="Finance Headquarters",
+            code="DASH-FIN-HQ",
+            department=another_department,
+        )
+
+        self.client.force_authenticate(user=self.hr_manager)
+
+        with patch(
+            "employees.views.DashboardService.get_dashboard",
+        ) as mock_service:
+            response = self.client.get(
+                self.dashboard_url,
+                {"site_id": another_site.pk},
+            )
+
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_403_FORBIDDEN,
+        )
+
+        mock_service.assert_not_called()
+
+    def test_hr_admin_and_super_admin_can_filter_global_site(self):
+        another_department = Department.objects.create(
+            name="Dashboard Finance",
+            code="DASH-FIN",
+        )
+        another_site = Site.objects.create(
+            name="Finance Headquarters",
+            code="DASH-FIN-HQ",
+            department=another_department,
+        )
+
+        for user in (self.hr_admin, self.super_admin):
+            with self.subTest(role=user.role):
+                self.client.force_authenticate(user=user)
+
+                with patch(
+                    "employees.views.DashboardService.get_dashboard",
+                    return_value=self.dashboard_data,
+                ) as mock_service:
+                    response = self.client.get(
+                        self.dashboard_url,
+                        {"site_id": another_site.pk},
+                    )
+
+                self.assertEqual(
+                    response.status_code,
+                    status.HTTP_200_OK,
+                )
+
+                mock_service.assert_called_once_with(
+                    site_id=another_site.pk,
+                    expiring_within_days=30,
+                    days=7,
+                    recent_limit=10,
+                )
+
+        self.client.force_authenticate(user=None)
 
     def test_hr_manager_cannot_access_another_department(self):
         """HR managers cannot access another department's data."""
@@ -17298,3 +17823,197 @@ class ProcessNotificationsCommandTests(TestCase):
             "SELECT pg_advisory_unlock(%s)",
             [726194003],
         )
+
+
+class DashboardFilterSerializerTests(TestCase):
+    """Tests for the HR dashboard filter serializer."""
+
+    def setUp(self):
+        self.department = Department.objects.create(
+            name="Dashboard Engineering",
+            code="DASH-ENG",
+        )
+        self.other_department = Department.objects.create(
+            name="Dashboard Finance",
+            code="DASH-FIN",
+        )
+        self.site = Site.objects.create(
+            name="Engineering Office",
+            code="ENG-OFFICE",
+            department=self.department,
+        )
+
+    def test_default_values_are_applied(self):
+        serializer = DashboardFilterSerializer(data={})
+
+        self.assertTrue(serializer.is_valid(), serializer.errors)
+
+        self.assertEqual(serializer.validated_data["days"], 7)
+        self.assertEqual(serializer.validated_data["recent_limit"], 10)
+        self.assertEqual(
+            serializer.validated_data["expiring_within_days"],
+            30,
+        )
+        self.assertNotIn("site_id", serializer.validated_data)
+        self.assertNotIn("uploaded_within_days", serializer.validated_data)
+
+    def test_existing_department_is_valid(self):
+        serializer = DashboardFilterSerializer(
+            data={"department_id": self.department.pk}
+        )
+
+        self.assertTrue(serializer.is_valid(), serializer.errors)
+        self.assertEqual(
+            serializer.validated_data["department_id"],
+            self.department.pk,
+        )
+
+    def test_nonexistent_department_is_invalid(self):
+        serializer = DashboardFilterSerializer(
+            data={"department_id": 999999}
+        )
+
+        self.assertFalse(serializer.is_valid())
+        self.assertIn("department_id", serializer.errors)
+
+    def test_zero_department_id_is_invalid(self):
+        serializer = DashboardFilterSerializer(
+            data={"department_id": 0}
+        )
+
+        self.assertFalse(serializer.is_valid())
+        self.assertIn("department_id", serializer.errors)
+
+    def test_existing_site_is_valid(self):
+        serializer = DashboardFilterSerializer(
+            data={"site_id": self.site.pk}
+        )
+
+        self.assertTrue(serializer.is_valid(), serializer.errors)
+        self.assertEqual(
+            serializer.validated_data["site_id"],
+            self.site.pk,
+        )
+
+    def test_nonexistent_site_is_invalid(self):
+        serializer = DashboardFilterSerializer(
+            data={"site_id": 999999}
+        )
+
+        self.assertFalse(serializer.is_valid())
+        self.assertIn("site_id", serializer.errors)
+
+    def test_zero_site_id_is_invalid(self):
+        serializer = DashboardFilterSerializer(
+            data={"site_id": 0}
+        )
+
+        self.assertFalse(serializer.is_valid())
+        self.assertIn("site_id", serializer.errors)
+
+    def test_expiring_within_days_accepts_supported_values(self):
+        for value in (7, 30, 60, 90):
+            with self.subTest(days=value):
+                serializer = DashboardFilterSerializer(
+                    data={"expiring_within_days": value}
+                )
+                self.assertTrue(serializer.is_valid(), serializer.errors)
+                self.assertEqual(
+                    serializer.validated_data["expiring_within_days"],
+                    value,
+                )
+
+    def test_expiring_within_days_rejects_unsupported_values(self):
+        for value in (1, 15, 45, 120):
+            with self.subTest(days=value):
+                serializer = DashboardFilterSerializer(
+                    data={"expiring_within_days": value}
+                )
+                self.assertFalse(serializer.is_valid())
+                self.assertIn("expiring_within_days", serializer.errors)
+
+    def test_uploaded_within_days_accepts_supported_values(self):
+        for value in (7, 30, 60, 90):
+            with self.subTest(days=value):
+                serializer = DashboardFilterSerializer(
+                    data={"uploaded_within_days": value}
+                )
+                self.assertTrue(serializer.is_valid(), serializer.errors)
+                self.assertEqual(
+                    serializer.validated_data["uploaded_within_days"],
+                    value,
+                )
+
+    def test_uploaded_within_days_rejects_unsupported_values(self):
+        for value in (1, 15, 45, 120):
+            with self.subTest(days=value):
+                serializer = DashboardFilterSerializer(
+                    data={"uploaded_within_days": value}
+                )
+                self.assertFalse(serializer.is_valid())
+                self.assertIn("uploaded_within_days", serializer.errors)
+
+    def test_days_boundaries(self):
+        for value in (1, 365):
+            with self.subTest(days=value):
+                serializer = DashboardFilterSerializer(
+                    data={"days": value}
+                )
+                self.assertTrue(serializer.is_valid(), serializer.errors)
+
+    def test_days_outside_boundaries_are_invalid(self):
+        for value in (0, 366):
+            with self.subTest(days=value):
+                serializer = DashboardFilterSerializer(
+                    data={"days": value}
+                )
+                self.assertFalse(serializer.is_valid())
+                self.assertIn("days", serializer.errors)
+
+    def test_recent_limit_boundaries(self):
+        for value in (1, 100):
+            with self.subTest(recent_limit=value):
+                serializer = DashboardFilterSerializer(
+                    data={"recent_limit": value}
+                )
+                self.assertTrue(serializer.is_valid(), serializer.errors)
+
+    def test_recent_limit_outside_boundaries_is_invalid(self):
+        for value in (0, 101):
+            with self.subTest(recent_limit=value):
+                serializer = DashboardFilterSerializer(
+                    data={"recent_limit": value}
+                )
+                self.assertFalse(serializer.is_valid())
+                self.assertIn("recent_limit", serializer.errors)
+
+    def test_past_reference_date_is_valid(self):
+        past_date = date.today() - timedelta(days=1)
+
+        serializer = DashboardFilterSerializer(
+            data={"as_of": past_date.isoformat()}
+        )
+
+        self.assertTrue(serializer.is_valid(), serializer.errors)
+        self.assertEqual(
+            serializer.validated_data["as_of"],
+            past_date,
+        )
+
+    def test_future_reference_date_is_invalid(self):
+        future_date = date.today() + timedelta(days=1)
+
+        serializer = DashboardFilterSerializer(
+            data={"as_of": future_date.isoformat()}
+        )
+
+        self.assertFalse(serializer.is_valid())
+        self.assertIn("as_of", serializer.errors)
+
+    def test_malformed_reference_date_is_invalid(self):
+        serializer = DashboardFilterSerializer(
+            data={"as_of": "not-a-date"}
+        )
+
+        self.assertFalse(serializer.is_valid())
+        self.assertIn("as_of", serializer.errors)

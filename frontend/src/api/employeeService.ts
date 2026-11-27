@@ -51,3 +51,12 @@ export async function getEmployees(
 
   return response.data
 }
+export async function getEmployeeById(
+  id: number,
+): Promise<EmployeeProfile> {
+  const response = await api.get<EmployeeProfile>(
+    `/employees/${id}/`,
+  )
+
+  return response.data
+}

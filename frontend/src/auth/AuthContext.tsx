@@ -10,21 +10,19 @@ import {
   getCurrentUser,
   logout as logoutRequest,
   refreshAccessToken,
-  type AuthTokens,
   type AuthUser,
 } from './authService'
 
 import {
   clearTokens,
-  getRefreshToken,
-  setTokens as storeTokens,
+  setAccessToken,
 } from './tokenStore'
 
 import { setSessionExpiredHandler } from '../api/client'
 import { AuthContext } from './context'
 
 interface RestoredSession {
-  tokens: AuthTokens
+  accessToken: string
   user: AuthUser
 }
 
@@ -35,25 +33,22 @@ function restoreSession(): Promise<RestoredSession | null> {
     return sessionRestorePromise
   }
 
-  const refreshToken = getRefreshToken()
-
-  if (!refreshToken) {
-    return Promise.resolve(null)
-  }
-
   sessionRestorePromise = (async () => {
     try {
-      const tokens = await refreshAccessToken(refreshToken)
+      const tokens = await refreshAccessToken()
 
-      if (!tokens.access || !tokens.refresh) {
-        throw new Error('Invalid token response.')
+      if (!tokens.access) {
+        throw new Error('Invalid access token response.')
       }
 
-      storeTokens(tokens)
+      setAccessToken(tokens.access)
 
       const user = await getCurrentUser(tokens.access)
 
-      return { tokens, user }
+      return {
+        accessToken: tokens.access,
+        user,
+      }
     } catch {
       clearTokens()
       return null
@@ -67,12 +62,12 @@ function restoreSession(): Promise<RestoredSession | null> {
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<AuthUser | null>(null)
-  const [tokens, setAuthTokens] = useState<AuthTokens | null>(null)
+  const [accessToken, setAuthAccessToken] = useState<string | null>(null)
   const [isLoading, setIsLoading] = useState(true)
 
   const handleSessionExpired = useCallback(() => {
     clearTokens()
-    setAuthTokens(null)
+    setAuthAccessToken(null)
     setUser(null)
   }, [])
 
@@ -95,10 +90,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       }
 
       if (session) {
-        setAuthTokens(session.tokens)
+        setAuthAccessToken(session.accessToken)
         setUser(session.user)
       } else {
-        setAuthTokens(null)
+        setAuthAccessToken(null)
         setUser(null)
       }
 
@@ -117,14 +112,20 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
     try {
       const authTokens = await loginRequest(email, password)
+
+      if (!authTokens.access) {
+        throw new Error('Invalid access token response.')
+      }
+
+      setAccessToken(authTokens.access)
+
       const currentUser = await getCurrentUser(authTokens.access)
 
-      storeTokens(authTokens)
-      setAuthTokens(authTokens)
+      setAuthAccessToken(authTokens.access)
       setUser(currentUser)
     } catch (error) {
       clearTokens()
-      setAuthTokens(null)
+      setAuthAccessToken(null)
       setUser(null)
       throw error
     } finally {
@@ -133,15 +134,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }
 
   async function logout(): Promise<void> {
-    const refreshToken = getRefreshToken()
-
     try {
-      if (refreshToken) {
-        await logoutRequest(refreshToken)
-      }
+      await logoutRequest()
     } finally {
       clearTokens()
-      setAuthTokens(null)
+      setAuthAccessToken(null)
       setUser(null)
     }
   }
@@ -150,7 +147,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     <AuthContext.Provider
       value={{
         user,
-        isAuthenticated: user !== null && tokens !== null,
+        isAuthenticated: user !== null && accessToken !== null,
         isLoading,
         login,
         logout,

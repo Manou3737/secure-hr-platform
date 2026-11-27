@@ -5,7 +5,7 @@ import { describe, expect, it } from 'vitest'
 import App from './App'
 
 describe('App', () => {
-  it('renders the login page', () => {
+  it('renders the login page', async () => {
     render(
       <MemoryRouter initialEntries={['/login']}>
         <App />
@@ -13,7 +13,7 @@ describe('App', () => {
     )
 
     expect(
-      screen.getByRole('heading', { name: 'Secure HR Platform' }),
+      await screen.findByRole('heading', { name: 'Secure HR Platform' }),
     ).toBeInTheDocument()
   })
 })

@@ -1,3 +1,4 @@
+
 from datetime import timedelta
 
 from django.db.models import Q
@@ -16,15 +17,33 @@ class EmployeeComplianceService:
     }
 
     EXPIRING_WITHIN_DAYS = 30
+    SUPPORTED_PERIODS = (7, 30, 60, 90)
 
     @classmethod
-    def get_dashboard(cls, *, department_id=None, as_of=None):
+    def get_dashboard(
+        cls,
+        *,
+        department_id=None,
+        site_id=None,
+        as_of=None,
+        expiring_within_days=30,
+        uploaded_within_days=None,
+    ):
         """
         Return compliance counts and affected employee/document records.
 
         Only active employees are included. A required document is considered
         present when a verified, non-expired document of that type exists.
         """
+        if expiring_within_days not in cls.SUPPORTED_PERIODS:
+            raise ValueError("Unsupported expiration period.")
+
+        if (
+            uploaded_within_days is not None
+            and uploaded_within_days not in cls.SUPPORTED_PERIODS
+        ):
+            raise ValueError("Unsupported upload period.")
+
         today = as_of or timezone.localdate()
 
         employees = (
@@ -35,6 +54,9 @@ class EmployeeComplianceService:
 
         if department_id is not None:
             employees = employees.filter(department_id=department_id)
+
+        if site_id is not None:
+            employees = employees.filter(site_id=site_id)
 
         employee_ids = list(employees.values_list("pk", flat=True))
 
@@ -53,7 +75,7 @@ class EmployeeComplianceService:
         soon_expiring_documents = verified_documents.filter(
             expires_at__gte=today,
             expires_at__lte=today + timedelta(
-                days=cls.EXPIRING_WITHIN_DAYS
+                days=expiring_within_days
             ),
         ).select_related("employee", "employee__user")
 
@@ -83,6 +105,31 @@ class EmployeeComplianceService:
                     "employee_name": employee.user.name,
                     "missing_document_types": missing_types,
                 })
+
+        recently_uploaded_documents = []
+        if uploaded_within_days is not None:
+            upload_start = (
+                today - timedelta(days=uploaded_within_days - 1)
+            )
+
+            recent_uploads = documents.filter(
+                uploaded_at__date__gte=upload_start,
+                uploaded_at__date__lte=today,
+            ).select_related(
+                "employee",
+                "employee__user",
+            ).order_by("-uploaded_at")
+
+            recently_uploaded_documents = list(
+                recent_uploads.values(
+                    "id",
+                    "employee_id",
+                    "employee__user__name",
+                    "document_type",
+                    "status",
+                    "uploaded_at",
+                )
+            )
 
         return {
             "as_of": today,
@@ -121,4 +168,8 @@ class EmployeeComplianceService:
                     "expires_at",
                 )
             ),
+            "recently_uploaded_document_count": len(
+                recently_uploaded_documents
+            ),
+            "recently_uploaded_documents": recently_uploaded_documents,
         }

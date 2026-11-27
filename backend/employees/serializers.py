@@ -17,6 +17,7 @@ from .models import (
     LeaveRequest,
     Department,
     EmployeeProfile,
+    Site,
     PayPeriod,
     Payroll,
     PayrollRecord,
@@ -40,6 +41,7 @@ import hashlib
 import logging
 
 logger = logging.getLogger(__name__)
+
 class EmployeeProfileSerializer(serializers.ModelSerializer):
     """Serialize employee HR profile data."""
 
@@ -51,6 +53,7 @@ class EmployeeProfileSerializer(serializers.ModelSerializer):
             "employee_id",
             "department",
             "position",
+            "site",
             "phone",
             "hire_date",
             "date_of_birth",
@@ -67,14 +70,40 @@ class EmployeeProfileSerializer(serializers.ModelSerializer):
     def validate_user(self, user):
         """Prevent multiple employee profiles for one user."""
 
-        if EmployeeProfile.objects.filter(
-            user=user
-        ).exists():
+        queryset = EmployeeProfile.objects.filter(user=user)
+
+        # During updates, exclude the current employee profile.
+        if self.instance:
+            queryset = queryset.exclude(pk=self.instance.pk)
+
+        if queryset.exists():
             raise serializers.ValidationError(
                 "This user already has an employee profile."
             )
 
         return user
+
+    def validate(self, attrs):
+        """Ensure the selected site belongs to the employee's department."""
+
+        department = attrs.get(
+            "department",
+            getattr(self.instance, "department", None),
+        )
+
+        site = attrs.get(
+            "site",
+            getattr(self.instance, "site", None),
+        )
+
+        if site and department and site.department_id != department.id:
+            raise serializers.ValidationError({
+                "site": (
+                    "The selected site must belong to the employee's department."
+                )
+            })
+
+        return attrs
 
 class DepartmentSerializer(serializers.ModelSerializer):
     """Serialize department information for read-only selection."""
@@ -87,6 +116,79 @@ class DepartmentSerializer(serializers.ModelSerializer):
             "code",
             "description",
         )
+
+class DashboardFilterSerializer(serializers.Serializer):
+    """Validate filters accepted by the HR dashboard API."""
+
+    department_id = serializers.IntegerField(
+        required=False,
+        min_value=1,
+    )
+
+    site_id = serializers.IntegerField(
+        required=False,
+        min_value=1,
+    )
+
+    expiring_within_days = serializers.ChoiceField(
+        choices=(7, 30, 60, 90),
+        required=False,
+        default=30,
+    )
+
+    uploaded_within_days = serializers.ChoiceField(
+        choices=(7, 30, 60, 90),
+        required=False,
+    )
+
+    as_of = serializers.DateField(
+        required=False,
+        allow_null=False,
+        validators=[validate_dashboard_as_of],
+    )
+
+    days = serializers.IntegerField(
+        required=False,
+        default=7,
+        validators=[validate_dashboard_days],
+    )
+
+    recent_limit = serializers.IntegerField(
+        required=False,
+        default=10,
+        validators=[validate_dashboard_recent_limit],
+    )
+
+    def validate_department_id(self, value):
+        """Ensure the requested department exists."""
+        if not Department.objects.filter(pk=value).exists():
+            raise serializers.ValidationError(
+                "The specified department does not exist."
+            )
+        return value
+
+    def validate_site_id(self, value):
+        """Ensure the requested site exists."""
+        if not Site.objects.filter(pk=value).exists():
+            raise serializers.ValidationError(
+                "The specified site does not exist."
+            )
+        return value
+
+class SiteSerializer(serializers.ModelSerializer):
+    """Serialize work site information."""
+
+    class Meta:
+        model = Site
+        fields = (
+            "id",
+            "name",
+            "code",
+            "address",
+            "department",
+            "is_active",
+        )
+        read_only_fields = ("id",)
 
 class PositionSerializer(serializers.ModelSerializer):
     """Serialize position information for read-only selection."""
@@ -520,41 +622,6 @@ class DocumentAccessLogSerializer(serializers.ModelSerializer):
         )
         read_only_fields = fields
 
-class DashboardFilterSerializer(serializers.Serializer):
-    """Validate filters accepted by the HR dashboard API."""
-
-    department_id = serializers.IntegerField(
-        required=False,
-        min_value=1,
-    )
-
-    as_of = serializers.DateField(
-        required=False,
-        allow_null=False,
-        validators=[validate_dashboard_as_of],
-    )
-
-    days = serializers.IntegerField(
-        required=False,
-        default=7,
-        validators=[validate_dashboard_days],
-    )
-
-    recent_limit = serializers.IntegerField(
-        required=False,
-        default=10,
-        validators=[validate_dashboard_recent_limit],
-    )
-
-    def validate_department_id(self, value):
-        """Ensure the requested department exists."""
-        if not Department.objects.filter(pk=value).exists():
-            raise serializers.ValidationError(
-                "The specified department does not exist."
-            )
-
-        return value
-
 class WorkforceHeadcountSerializer(serializers.Serializer):
     total = serializers.IntegerField()
     active_accounts = serializers.IntegerField()
@@ -618,6 +685,14 @@ class ComplianceDocumentDetailSerializer(serializers.Serializer):
     document_type = serializers.CharField()
     expires_at = serializers.DateField(allow_null=True)
 
+class ComplianceRecentlyUploadedDocumentSerializer(serializers.Serializer):
+    id = serializers.UUIDField()
+    employee_id = serializers.CharField()
+    employee__user__name = serializers.CharField()
+    document_type = serializers.CharField()
+    status = serializers.CharField()
+    uploaded_at = serializers.DateTimeField()
+
 class ComplianceProfilesSerializer(serializers.Serializer):
     complete = serializers.IntegerField()
     incomplete = serializers.IntegerField()
@@ -635,6 +710,10 @@ class ComplianceDocumentsSerializer(serializers.Serializer):
     expired_details = ComplianceDocumentDetailSerializer(many=True)
     expiring_soon_count = serializers.IntegerField()
     expiring_soon_details = ComplianceDocumentDetailSerializer(many=True)
+    recently_uploaded_count = serializers.IntegerField()
+    recently_uploaded_details = (
+        ComplianceRecentlyUploadedDocumentSerializer(many=True)
+    )
 
 class ComplianceMetricsSerializer(serializers.Serializer):
     as_of = serializers.DateField()
@@ -650,6 +729,15 @@ class OnboardingJourneyMetricsSerializer(serializers.Serializer):
     completed = serializers.IntegerField()
     cancelled = serializers.IntegerField()
 
+class OnboardingOverdueTaskDetailSerializer(serializers.Serializer):
+    id = serializers.UUIDField()
+    title = serializers.CharField()
+    due_date = serializers.DateField()
+    priority = serializers.CharField()
+    status = serializers.CharField()
+    employee_name = serializers.CharField()
+
+
 class OnboardingTaskMetricsSerializer(serializers.Serializer):
     total = serializers.IntegerField()
     pending = serializers.IntegerField()
@@ -658,6 +746,9 @@ class OnboardingTaskMetricsSerializer(serializers.Serializer):
     completed = serializers.IntegerField()
     cancelled = serializers.IntegerField()
     overdue = serializers.IntegerField()
+    overdue_details = OnboardingOverdueTaskDetailSerializer(
+        many=True
+    )
     low_priority = serializers.IntegerField()
     medium_priority = serializers.IntegerField()
     high_priority = serializers.IntegerField()

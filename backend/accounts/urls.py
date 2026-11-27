@@ -1,7 +1,6 @@
 from django.urls import include, path
 
 from rest_framework.routers import DefaultRouter
-from rest_framework_simplejwt.views import TokenRefreshView
 
 from . import views
 
@@ -65,8 +64,13 @@ router.register(
 
 urlpatterns = [
     path(
+        "csrf/",
+        views.csrf_cookie_view,
+        name="csrf",
+    ),
+    path(
         "refresh/",
-        TokenRefreshView.as_view(),
+        views.CookieTokenRefreshView.as_view(),
         name="token_refresh",
     ),
     path(

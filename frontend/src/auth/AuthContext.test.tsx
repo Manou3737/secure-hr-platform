@@ -2,6 +2,7 @@ import { act, render, screen, waitFor } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import {
+  login,
   getCurrentUser,
   logout,
   refreshAccessToken,
@@ -9,7 +10,7 @@ import {
 
 import { AuthProvider } from './AuthContext'
 import { useAuth } from './useAuth'
-import { clearTokens, getAccessToken, getRefreshToken, setTokens } from './tokenStore'
+import { clearTokens, getAccessToken } from './tokenStore'
 
 import type { AuthTokens, AuthUser } from './authService'
 
@@ -22,17 +23,10 @@ vi.mock('./authService', () => ({
 
 vi.mock('../api/client', () => ({
   setSessionExpiredHandler: vi.fn(),
-  default: {
-    interceptors: {
-      request: { use: vi.fn() },
-      response: { use: vi.fn() },
-    },
-  },
 }))
 
 const tokens: AuthTokens = {
   access: 'test-access',
-  refresh: 'test-refresh',
 }
 
 const user: AuthUser = {
@@ -56,6 +50,9 @@ function AuthProbe() {
       <p data-testid="user">
         {auth.user?.email ?? 'No user'}
       </p>
+      <button onClick={() => auth.login('employee@example.com', 'password')}>
+        Login
+      </button>
       <button onClick={() => auth.logout()}>
         Logout
       </button>
@@ -74,25 +71,28 @@ function renderAuthProvider() {
 describe('AuthContext', () => {
   beforeEach(() => {
     clearTokens()
-    sessionStorage.clear()
     vi.clearAllMocks()
   })
 
-  it('starts unauthenticated when no refresh token exists', async () => {
+  it('attempts cookie-based session restoration on startup', async () => {
+    vi.mocked(refreshAccessToken).mockRejectedValue(
+      new Error('No valid refresh cookie'),
+    )
+
     renderAuthProvider()
 
     await waitFor(() => {
       expect(screen.getByTestId('loading')).toHaveTextContent('false')
     })
 
+    expect(refreshAccessToken).toHaveBeenCalledTimes(1)
+    expect(refreshAccessToken).toHaveBeenCalledWith()
     expect(screen.getByTestId('authenticated')).toHaveTextContent('false')
     expect(screen.getByTestId('user')).toHaveTextContent('No user')
-    expect(refreshAccessToken).not.toHaveBeenCalled()
+    expect(getAccessToken()).toBeNull()
   })
 
-  it('restores a valid session', async () => {
-    sessionStorage.setItem('secure_hr_refresh_token', tokens.refresh)
-
+  it('restores a valid session using the refresh cookie', async () => {
     vi.mocked(refreshAccessToken).mockResolvedValue(tokens)
     vi.mocked(getCurrentUser).mockResolvedValue(user)
 
@@ -102,16 +102,15 @@ describe('AuthContext', () => {
       expect(screen.getByTestId('authenticated')).toHaveTextContent('true')
     })
 
+    expect(refreshAccessToken).toHaveBeenCalledTimes(1)
+    expect(getCurrentUser).toHaveBeenCalledWith(tokens.access)
     expect(screen.getByTestId('user')).toHaveTextContent(user.email)
     expect(getAccessToken()).toBe(tokens.access)
-    expect(getRefreshToken()).toBe(tokens.refresh)
   })
 
-  it('clears an invalid session', async () => {
-    sessionStorage.setItem('secure_hr_refresh_token', tokens.refresh)
-
+  it('clears the local session when cookie-based restoration fails', async () => {
     vi.mocked(refreshAccessToken).mockRejectedValue(
-      new Error('Invalid refresh token'),
+      new Error('Invalid refresh cookie'),
     )
 
     renderAuthProvider()
@@ -121,12 +120,34 @@ describe('AuthContext', () => {
     })
 
     expect(screen.getByTestId('authenticated')).toHaveTextContent('false')
-    expect(getRefreshToken()).toBeNull()
     expect(getAccessToken()).toBeNull()
   })
 
+  it('logs in and stores only the access token in memory', async () => {
+    vi.mocked(refreshAccessToken).mockRejectedValue(
+      new Error('No valid refresh cookie'),
+    )
+    vi.mocked(login).mockResolvedValue(tokens)
+    vi.mocked(getCurrentUser).mockResolvedValue(user)
+
+    renderAuthProvider()
+
+    await waitFor(() => {
+      expect(screen.getByTestId('loading')).toHaveTextContent('false')
+    })
+
+    await act(async () => {
+      screen.getByRole('button', { name: 'Login' }).click()
+    })
+
+    expect(login).toHaveBeenCalledWith('employee@example.com', 'password')
+    expect(getCurrentUser).toHaveBeenCalledWith(tokens.access)
+    expect(getAccessToken()).toBe(tokens.access)
+    expect(screen.getByTestId('authenticated')).toHaveTextContent('true')
+    expect(screen.getByTestId('user')).toHaveTextContent(user.email)
+  })
+
   it('logs out and clears the local session', async () => {
-    setTokens(tokens)
     vi.mocked(refreshAccessToken).mockResolvedValue(tokens)
     vi.mocked(getCurrentUser).mockResolvedValue(user)
     vi.mocked(logout).mockResolvedValue(undefined)
@@ -141,9 +162,9 @@ describe('AuthContext', () => {
       screen.getByRole('button', { name: 'Logout' }).click()
     })
 
-    expect(logout).toHaveBeenCalledWith(tokens.refresh)
-    expect(getRefreshToken()).toBeNull()
+    expect(logout).toHaveBeenCalledWith()
     expect(getAccessToken()).toBeNull()
     expect(screen.getByTestId('authenticated')).toHaveTextContent('false')
+    expect(screen.getByTestId('user')).toHaveTextContent('No user')
   })
 })

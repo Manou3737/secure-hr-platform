@@ -10,20 +10,21 @@ import {
 import { ToastProvider } from '../ui/ToastProvider'
 import AppLayout from './AppLayout'
 
-const { logoutMock } = vi.hoisted(() => ({
+const { logoutMock, currentUser } = vi.hoisted(() => ({
   logoutMock: vi.fn(),
+  currentUser: {
+    id: 1,
+    name: 'Test HR Admin',
+    email: 'admin@example.com',
+    role: 'HR_ADMIN',
+    email_verified: true,
+    is_active: true,
+  },
 }))
 
 vi.mock('../../auth/useAuth', () => ({
   useAuth: () => ({
-    user: {
-      id: 1,
-      name: 'Test HR Admin',
-      email: 'admin@example.com',
-      role: 'HR_ADMIN',
-      email_verified: true,
-      is_active: true,
-    },
+    user: currentUser,
     logout: logoutMock,
   }),
 }))
@@ -46,6 +47,10 @@ function renderLayout(initialRoute = '/dashboard') {
               path="/employees"
               element={<div>Employees page content</div>}
             />
+            <Route
+              path="/compliance"
+              element={<div>Compliance page content</div>}
+            />
           </Route>
         </Routes>
       </MemoryRouter>
@@ -56,15 +61,21 @@ function renderLayout(initialRoute = '/dashboard') {
 describe('AppLayout', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+
+    Object.assign(currentUser, {
+      id: 1,
+      name: 'Test HR Admin',
+      email: 'admin@example.com',
+      role: 'HR_ADMIN',
+      email_verified: true,
+      is_active: true,
+    })
+
     logoutMock.mockResolvedValue(undefined)
   })
 
   it('displays the user information in the topbar', () => {
     renderLayout()
-
-    expect(
-      screen.getByRole('button', { name: 'Open user menu' }),
-    ).toBeInTheDocument()
 
     expect(
       screen.getByRole('navigation', { name: 'Breadcrumb' }),
@@ -73,6 +84,46 @@ describe('AppLayout', () => {
     expect(
       screen.getByRole('navigation', { name: 'Main navigation' }),
     ).toBeInTheDocument()
+  })
+
+  it('shows Compliance navigation for HR_ADMIN', () => {
+    currentUser.role = 'HR_ADMIN'
+
+    renderLayout()
+
+    expect(
+      screen.getByRole('link', { name: /compliance/i }),
+    ).toBeInTheDocument()
+  })
+
+  it('shows Compliance navigation for SUPER_ADMIN', () => {
+    currentUser.role = 'SUPER_ADMIN'
+
+    renderLayout()
+
+    expect(
+      screen.getByRole('link', { name: /compliance/i }),
+    ).toBeInTheDocument()
+  })
+
+  it('shows Compliance navigation for HR_MANAGER', () => {
+    currentUser.role = 'HR_MANAGER'
+
+    renderLayout()
+
+    expect(
+      screen.getByRole('link', { name: /compliance/i }),
+    ).toBeInTheDocument()
+  })
+
+  it('does not show Compliance navigation for EMPLOYEE', () => {
+    currentUser.role = 'EMPLOYEE'
+
+    renderLayout()
+
+    expect(
+      screen.queryByRole('link', { name: /compliance/i }),
+    ).not.toBeInTheDocument()
   })
 
   it('opens the user menu and displays account information', async () => {
@@ -314,6 +365,22 @@ describe('AppLayout', () => {
 
     expect(logoutMock).not.toHaveBeenCalled()
     expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument()
+  })
+
+  it('navigates to the Compliance page when clicking the navigation link', async () => {
+    const user = userEvent.setup()
+
+    currentUser.role = 'HR_ADMIN'
+
+    renderLayout()
+
+    await user.click(
+      screen.getByRole('link', { name: /compliance/i }),
+    )
+
+    expect(
+      screen.getByText('Compliance page content'),
+    ).toBeInTheDocument()
   })
 
   it('logs out from the sidebar after confirmation', async () => {

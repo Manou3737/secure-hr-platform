@@ -36,7 +36,10 @@ class DashboardService:
         cls,
         *,
         department_id=None,
+        site_id=None,
         as_of=None,
+        expiring_within_days=30,
+        uploaded_within_days=None,
         days=7,
         recent_limit=10,
     ):
@@ -47,7 +50,10 @@ class DashboardService:
             ),
             "compliance": ComplianceMetricsService.get_dashboard(
                 department_id=department_id,
+                site_id=site_id,
                 as_of=as_of,
+                expiring_within_days=expiring_within_days,
+                uploaded_within_days=uploaded_within_days,
             ),
             "onboarding": OnboardingMetricsService.get_dashboard(
                 department_id=department_id,

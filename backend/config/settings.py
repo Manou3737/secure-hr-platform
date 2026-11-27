@@ -12,7 +12,8 @@ https://docs.djangoproject.com/en/6.1/ref/settings/
 import os
 from pathlib import Path
 from dotenv import load_dotenv
-
+from django.conf import settings
+from datetime import timedelta
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -160,10 +161,38 @@ DEFAULT_FROM_EMAIL = "no-reply@securehr.local"
 AUTH_USER_MODEL = "accounts.User"
 
 SIMPLE_JWT = {
+    "ACCESS_TOKEN_LIFETIME": timedelta(minutes=5),
+    "REFRESH_TOKEN_LIFETIME": timedelta(days=1),
     "ROTATE_REFRESH_TOKENS": True,
     "BLACKLIST_AFTER_ROTATION": True,
 }
+# Authentication cookie configuration
+AUTH_REFRESH_COOKIE_NAME = "secure_hr_refresh"
 
+AUTH_REFRESH_COOKIE_PATH = "/api/v1/auth/"
+
+AUTH_REFRESH_COOKIE_SECURE = (
+    os.environ.get(
+        "AUTH_COOKIE_SECURE",
+        "True" if not DEBUG else "False",
+    ).lower()
+    in ("true", "1", "yes", "on")
+)
+
+AUTH_REFRESH_COOKIE_HTTPONLY = True
+AUTH_REFRESH_COOKIE_SAMESITE = "Lax"
+
+AUTH_REFRESH_COOKIE_MAX_AGE = int(
+    SIMPLE_JWT["REFRESH_TOKEN_LIFETIME"].total_seconds()
+)
+
+
+# CSRF protection for cookie-based authentication
+CSRF_COOKIE_HTTPONLY = False
+CSRF_COOKIE_SECURE = AUTH_REFRESH_COOKIE_SECURE
+CSRF_COOKIE_SAMESITE = "Lax"
+
+SESSION_COOKIE_SECURE = AUTH_REFRESH_COOKIE_SECURE
 REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": (
         "rest_framework_simplejwt.authentication.JWTAuthentication",

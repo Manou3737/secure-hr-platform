@@ -3,6 +3,7 @@ from django.urls import path
 from .views import (
     EmployeeProfileViewSet,
     DepartmentViewSet,
+    SiteViewSet,
     PositionViewSet,
     LeaveRequestViewSet,
     BankAccountViewSet,
@@ -19,6 +20,11 @@ router.register(
     "departments",
     DepartmentViewSet,
     basename="department",
+)
+router.register(
+    "sites",
+    SiteViewSet,
+    basename="site",
 )
 router.register(
     "positions",

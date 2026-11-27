@@ -52,6 +52,7 @@ from .models import (
     BankAccount,
     PerformanceReview,
     Position,
+    Site,
     HRDocument,
     DocumentReview,
     OnboardingJourney,
@@ -68,6 +69,7 @@ from .permissions import (
 )
 from .serializers import (
     DepartmentSerializer,
+    SiteSerializer,
     PositionSerializer,
     EmployeeProfileSerializer,
     LeaveRequestSerializer,
@@ -114,6 +116,42 @@ class DepartmentViewSet(viewsets.ReadOnlyModelViewSet):
 
         return Department.objects.none()
 
+class SiteViewSet(viewsets.ReadOnlyModelViewSet):
+    """Read-only site endpoint with HR role isolation."""
+
+    serializer_class = SiteSerializer
+    permission_classes = (DepartmentPositionReadPermission,)
+
+    def get_queryset(self):
+        user = self.request.user
+
+        if user.role in ("SUPER_ADMIN", "HR_ADMIN"):
+            queryset = Site.objects.all()
+
+        elif user.role == "HR_MANAGER":
+            try:
+                manager_profile = user.employee_profile
+            except EmployeeProfile.DoesNotExist:
+                raise DRFPermissionDenied(
+                    "An employee profile is required for HR managers."
+                )
+
+            queryset = Site.objects.filter(
+                department_id=manager_profile.department_id
+            )
+
+        else:
+            return Site.objects.none()
+
+        department_id = self.request.query_params.get("department")
+        if department_id:
+            queryset = queryset.filter(
+                department_id=department_id
+            )
+
+        return queryset.select_related(
+            "department"
+        ).order_by("name")
 
 class PositionViewSet(viewsets.ReadOnlyModelViewSet):
     """Read-only position endpoint with HR role isolation."""
@@ -1404,12 +1442,25 @@ class OnboardingJourneyViewSet(viewsets.ReadOnlyModelViewSet):
             "employee__user",
         )
 
-        if user.role in {
-            "SUPER_ADMIN",
-            "HR_ADMIN",
-            "HR_MANAGER",
-        }:
+        if user.role in {"SUPER_ADMIN", "HR_ADMIN"}:
             return queryset
+
+        if user.role == "HR_MANAGER":
+            try:
+                manager_profile = user.employee_profile
+            except EmployeeProfile.DoesNotExist:
+                raise DRFPermissionDenied(
+                    "An employee profile is required for HR managers."
+                )
+
+            if manager_profile.department_id is None:
+                raise DRFPermissionDenied(
+                    "A department is required for HR managers."
+                )
+
+            return queryset.filter(
+                employee__department_id=manager_profile.department_id
+            )
 
         if user.role == "EMPLOYEE":
             return queryset.filter(employee__user_id=user.pk)
@@ -1461,12 +1512,27 @@ class OnboardingTaskViewSet(viewsets.GenericViewSet):
             "assigned_to",
         )
 
-        if user.role in {
-            "SUPER_ADMIN",
-            "HR_ADMIN",
-            "HR_MANAGER",
-        }:
+        if user.role in {"SUPER_ADMIN", "HR_ADMIN"}:
             return queryset
+
+        if user.role == "HR_MANAGER":
+            try:
+                manager_profile = user.employee_profile
+            except EmployeeProfile.DoesNotExist:
+                raise DRFPermissionDenied(
+                    "An employee profile is required for HR managers."
+                )
+
+            if manager_profile.department_id is None:
+                raise DRFPermissionDenied(
+                    "A department is required for HR managers."
+                )
+
+            return queryset.filter(
+                journey__employee__department_id=(
+                    manager_profile.department_id
+                )
+            )
 
         if user.role == "EMPLOYEE":
             return queryset.filter(
@@ -1664,6 +1730,27 @@ class DashboardView(APIView):
                 description="Filter dashboard metrics by department ID.",
             ),
             OpenApiParameter(
+                name="site_id",
+                type=int,
+                location=OpenApiParameter.QUERY,
+                required=False,
+                description="Filter compliance metrics by site ID.",
+            ),
+            OpenApiParameter(
+                name="expiring_within_days",
+                type=int,
+                location=OpenApiParameter.QUERY,
+                required=False,
+                description="Compliance expiration window: 7, 30, 60, or 90 days. Defaults to 30.",
+            ),
+            OpenApiParameter(
+                name="uploaded_within_days",
+                type=int,
+                location=OpenApiParameter.QUERY,
+                required=False,
+                description="Recently uploaded documents window: 7, 30, 60, or 90 days. Optional.",
+            ),
+            OpenApiParameter(
                 name="as_of",
                 type=OpenApiTypes.DATE,
                 location=OpenApiParameter.QUERY,
@@ -1743,7 +1830,19 @@ class DashboardView(APIView):
                 )
 
             dashboard_filters["department_id"] = manager_department_id
+            requested_site_id = dashboard_filters.get("site_id")
 
+            if (
+                requested_site_id is not None
+                and not Site.objects.filter(
+                    pk=requested_site_id,
+                    department_id=manager_department_id,
+                ).exists()
+            ):
+                raise DRFPermissionDenied(
+                    "You can only access sites "
+                    "belonging to your own department."
+                )
         dashboard_data = DashboardService.get_dashboard(
             **dashboard_filters
         )

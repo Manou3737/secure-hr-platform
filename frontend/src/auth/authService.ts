@@ -1,8 +1,7 @@
-import api from '../api/client'
+import api, { ensureCsrfCookie } from '../api/client'
 
 export interface AuthTokens {
   access: string
-  refresh: string
 }
 
 export interface AuthUser {
@@ -18,6 +17,8 @@ export async function login(
   email: string,
   password: string,
 ): Promise<AuthTokens> {
+  await ensureCsrfCookie()
+
   const response = await api.post<AuthTokens>(
     '/auth/login/',
     { email, password },
@@ -41,21 +42,18 @@ export async function getCurrentUser(
   return response.data
 }
 
-export async function refreshAccessToken(
-  refreshToken: string,
-): Promise<AuthTokens> {
+export async function refreshAccessToken(): Promise<AuthTokens> {
+  await ensureCsrfCookie()
+
   const response = await api.post<AuthTokens>(
     '/auth/refresh/',
-    { refresh: refreshToken },
   )
 
   return response.data
 }
 
-export async function logout(
-  refreshToken: string,
-): Promise<void> {
-  await api.post('/auth/logout/', {
-    refresh: refreshToken,
-  })
+export async function logout(): Promise<void> {
+  await ensureCsrfCookie()
+
+  await api.post('/auth/logout/')
 }
